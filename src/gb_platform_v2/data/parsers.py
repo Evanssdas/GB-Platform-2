@@ -8,11 +8,18 @@ avoided.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
+from ..timebase import settlement_periods_for_day
 
-def _records(payload: dict) -> list[dict]:
+
+def _records(payload: Any) -> list[dict]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        raise TypeError("Expected a JSON object or array")
     for key in ("data", "records", "result"):
         value = payload.get(key)
         if isinstance(value, list):
@@ -31,16 +38,41 @@ def _column(frame: pd.DataFrame, aliases: Iterable[str], label: str) -> str:
 
 
 def _settlement_timestamp(date: pd.Series, period: pd.Series) -> pd.Series:
-    day = pd.to_datetime(date, errors="coerce")
-    sp = pd.to_numeric(period, errors="coerce")
-    return (day + pd.to_timedelta((sp - 1) * 30, unit="m")).dt.tz_localize(
-        "Europe/London",
-        ambiguous="infer",
-        nonexistent="shift_forward",
-    ).dt.tz_convert("UTC")
+    """Map local GB settlement date and period to UTC, including 46/50-period days."""
+    dates = pd.to_datetime(date, errors="coerce")
+    periods = pd.to_numeric(period, errors="coerce")
+    cache: dict[pd.Timestamp, pd.DatetimeIndex] = {}
+    values: list[pd.Timestamp] = []
+    for day, settlement_period in zip(dates, periods):
+        if pd.isna(day) or pd.isna(settlement_period):
+            values.append(pd.NaT)
+            continue
+        normalised = pd.Timestamp(day).normalize()
+        if normalised not in cache:
+            cache[normalised] = settlement_periods_for_day(normalised)
+        index = cache[normalised]
+        position = int(settlement_period) - 1
+        if position < 0 or position >= len(index):
+            values.append(pd.NaT)
+        else:
+            values.append(index[position].tz_convert("UTC"))
+    return pd.Series(pd.DatetimeIndex(values), index=date.index)
 
 
-def parse_elexon_mid(payload: dict) -> pd.DataFrame:
+def _timestamp_from_source_or_period(
+    frame: pd.DataFrame,
+    date_column: str,
+    period_column: str,
+) -> pd.Series:
+    for candidate in ("startTime", "start_time", "timeFrom", "time_from"):
+        if candidate in frame:
+            parsed = pd.to_datetime(frame[candidate], utc=True, errors="coerce")
+            if parsed.notna().any():
+                return parsed
+    return _settlement_timestamp(frame[date_column], frame[period_column])
+
+
+def parse_elexon_mid(payload: Any) -> pd.DataFrame:
     frame = pd.DataFrame(_records(payload))
     date = _column(frame, ["settlementDate", "settlement_date"], "settlement date")
     period = _column(frame, ["settlementPeriod", "settlement_period"], "settlement period")
@@ -50,7 +82,7 @@ def parse_elexon_mid(payload: dict) -> pd.DataFrame:
 
     out = pd.DataFrame(
         {
-            "timestamp": _settlement_timestamp(frame[date], frame[period]),
+            "timestamp": _timestamp_from_source_or_period(frame, date, period),
             "settlement_date": pd.to_datetime(frame[date]).dt.date,
             "settlement_period": pd.to_numeric(frame[period], errors="coerce"),
             "data_provider": frame[provider].astype(str),
@@ -62,13 +94,13 @@ def parse_elexon_mid(payload: dict) -> pd.DataFrame:
     return out.dropna(subset=["timestamp", "price_gbp_mwh"]).sort_values("timestamp")
 
 
-def parse_elexon_fuelhh(payload: dict) -> pd.DataFrame:
+def parse_elexon_fuelhh(payload: Any) -> pd.DataFrame:
     frame = pd.DataFrame(_records(payload))
     date = _column(frame, ["settlementDate", "settlement_date"], "settlement date")
     period = _column(frame, ["settlementPeriod", "settlement_period"], "settlement period")
     fuel = _column(frame, ["fuelType", "fuel_type"], "fuel type")
     value = _column(frame, ["generation", "quantity", "value"], "generation")
-    frame["timestamp"] = _settlement_timestamp(frame[date], frame[period])
+    frame["timestamp"] = _timestamp_from_source_or_period(frame, date, period)
     frame["fuel_type"] = frame[fuel].astype(str).str.upper()
     frame["generation_mw"] = pd.to_numeric(frame[value], errors="coerce")
     wide = frame.pivot_table(
@@ -81,7 +113,7 @@ def parse_elexon_fuelhh(payload: dict) -> pd.DataFrame:
     return wide.sort_index().reset_index()
 
 
-def parse_elexon_demand(payload: dict) -> pd.DataFrame:
+def parse_elexon_demand(payload: Any) -> pd.DataFrame:
     frame = pd.DataFrame(_records(payload))
     date = _column(frame, ["settlementDate", "settlement_date"], "settlement date")
     period = _column(frame, ["settlementPeriod", "settlement_period"], "settlement period")
@@ -92,10 +124,30 @@ def parse_elexon_demand(payload: dict) -> pd.DataFrame:
     )
     return pd.DataFrame(
         {
-            "timestamp": _settlement_timestamp(frame[date], frame[period]),
+            "timestamp": _timestamp_from_source_or_period(frame, date, period),
             "demand_mw": pd.to_numeric(frame[value], errors="coerce"),
         }
     ).dropna().sort_values("timestamp")
+
+
+def parse_elexon_interconnectors(payload: Any) -> pd.DataFrame:
+    frame = pd.DataFrame(_records(payload))
+    date = _column(frame, ["settlementDate", "settlement_date"], "settlement date")
+    period = _column(frame, ["settlementPeriod", "settlement_period"], "settlement period")
+    name = _column(frame, ["interconnectorName", "interconnector_name"], "interconnector")
+    value = _column(frame, ["generation", "value"], "interconnector generation")
+    frame["timestamp"] = _timestamp_from_source_or_period(frame, date, period)
+    frame["interconnector"] = frame[name].astype(str).str.lower()
+    frame["flow_mw"] = pd.to_numeric(frame[value], errors="coerce")
+    wide = frame.pivot_table(
+        index="timestamp",
+        columns="interconnector",
+        values="flow_mw",
+        aggfunc="sum",
+    )
+    wide.columns = [f"interconnector_{column}_mw" for column in wide.columns]
+    wide["net_import_mw"] = wide.sum(axis=1, min_count=1)
+    return wide.sort_index().reset_index()
 
 
 def parse_neso_records(records: list[dict]) -> pd.DataFrame:
@@ -103,10 +155,12 @@ def parse_neso_records(records: list[dict]) -> pd.DataFrame:
     frame = pd.DataFrame(records)
     if frame.empty:
         return frame
+    rename: dict[str, str] = {}
     for column in frame.columns:
         normalised = str(column).strip().lower().replace(" ", "_")
         if normalised != column and normalised not in frame:
-            frame = frame.rename(columns={column: normalised})
+            rename[str(column)] = normalised
+    frame = frame.rename(columns=rename)
     for candidate in (
         "timestamp",
         "datetime",
