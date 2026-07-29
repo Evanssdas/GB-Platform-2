@@ -42,16 +42,23 @@ jobs:
           --end "${{ steps.dates.outputs.end }}"
           --actuals live/actuals.csv
           --revision initial
-      - name: Grade forecasts
-        run: >-
-          gb-v2 grade
-          --forecasts live/forecasts.csv
-          --actuals live/actuals.csv
-          --scores live/scores.csv
+      - name: Grade forecasts when forecast log exists
+        shell: bash
+        run: |
+          if [ -f live/forecasts.csv ]; then
+            gb-v2 grade \
+              --forecasts live/forecasts.csv \
+              --actuals live/actuals.csv \
+              --scores live/scores.csv
+          else
+            echo "No forecast log yet; actuals were stored without grading."
+          fi
       - name: Commit immutable actuals and scores
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add live/actuals.csv live/scores.csv
+          git add live/actuals.csv
+          [ ! -f live/scores.csv ] || git add live/scores.csv
           git diff --cached --quiet || git commit -m "Grade APXMIDP ${{ steps.dates.outputs.day }}"
           git push
