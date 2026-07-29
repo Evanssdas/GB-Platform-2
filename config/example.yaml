@@ -1,0 +1,79 @@
+project:
+  timezone: Europe/London
+  frequency: 30min
+  random_seed: 42
+  price_transform_scale: 50.0
+  monte_carlo_scenarios: 1000
+
+sources:
+  elexon_base_url: https://data.elexon.co.uk/bmrs/api/v1
+  neso_ckan_base_url: https://api.neso.energy/api/3/action
+  open_meteo_forecast_url: https://api.open-meteo.com/v1/forecast
+  open_meteo_archive_url: https://archive-api.open-meteo.com/v1/archive
+  entsoe_base_url: https://web-api.tp.entsoe.eu/api
+  jao_base_url: https://publicationtool.jao.eu
+
+weather_sites:
+  demand:
+    - {name: london, latitude: 51.5072, longitude: -0.1276, weight: 0.30}
+    - {name: birmingham, latitude: 52.4862, longitude: -1.8904, weight: 0.25}
+    - {name: manchester, latitude: 53.4808, longitude: -2.2426, weight: 0.20}
+    - {name: glasgow, latitude: 55.8642, longitude: -4.2518, weight: 0.15}
+    - {name: bristol, latitude: 51.4545, longitude: -2.5879, weight: 0.10}
+  wind:
+    - {name: dogger, latitude: 54.75, longitude: 2.00, weight: 0.25}
+    - {name: moray, latitude: 58.10, longitude: -2.80, weight: 0.20}
+    - {name: irish_sea, latitude: 53.60, longitude: -4.20, weight: 0.20}
+    - {name: north_sea_south, latitude: 52.80, longitude: 2.00, weight: 0.20}
+    - {name: scotland, latitude: 56.80, longitude: -3.80, weight: 0.15}
+  solar:
+    - {name: london, latitude: 51.5072, longitude: -0.1276, weight: 0.30}
+    - {name: bristol, latitude: 51.4545, longitude: -2.5879, weight: 0.25}
+    - {name: norwich, latitude: 52.6309, longitude: 1.2974, weight: 0.20}
+    - {name: midlands, latitude: 52.4862, longitude: -1.8904, weight: 0.25}
+
+model:
+  component_targets:
+    - demand_mw
+    - embedded_wind_mw
+    - embedded_solar_mw
+    - transmission_wind_mw
+    - nuclear_mw
+    - net_import_mw
+    - battery_net_mw
+    - inertia_gvas
+  price_target: price_gbp_mwh
+  holdout_rows: 4320
+  time_series_splits: 5
+  lightgbm:
+    n_estimators: 600
+    learning_rate: 0.03
+    num_leaves: 31
+    subsample: 0.85
+    colsample_bytree: 0.85
+    random_state: 42
+
+risk:
+  illustrative_position_mwh: 100.0
+  confidence_levels: [0.95, 0.99]
+  lookback_periods: 1440
+  legacy_volatility_periods: 1440
+
+frequency_screen:
+  nominal_hz: 50.0
+  largest_loss_mw: 1800.0
+  response_mw: 1200.0
+  response_delivery_seconds: 1.0
+  damping_mw_per_hz: 1000.0
+  warning_nadir_hz: 49.2
+
+marginal_classes:
+  - CCGT
+  - OCGT
+  - biomass
+  - interconnector
+  - battery
+  - pumped_storage
+  - demand_response
+  - renewable_or_negative_price
+  - scarcity_or_other
