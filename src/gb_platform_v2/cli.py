@@ -15,6 +15,7 @@ from .collection import (
     collect_neso_resource,
     collect_previous_run_weather,
 )
+from .data.neso import NESO_RESOURCES
 from .dataset_builder import build_half_hourly_dataset
 from .features import add_cyclical_time_features, add_system_balance_features, add_weather_features
 from .live import collect_and_append_price_actuals, run_and_log_forecast
@@ -111,17 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     neso.add_argument("--output", required=True)
 
     neso_preset = sub.add_parser("collect-neso-preset", help="Collect a known NESO dataset")
-    neso_preset.add_argument(
-        "--name",
-        choices=[
-            "embedded_current",
-            "embedded_2026_h1",
-            "embedded_2025",
-            "inertia_2026_27",
-            "inertia_cost",
-        ],
-        required=True,
-    )
+    neso_preset.add_argument("--name", choices=sorted(NESO_RESOURCES), required=True)
     neso_preset.add_argument("--output", required=True)
 
     weather = sub.add_parser(
