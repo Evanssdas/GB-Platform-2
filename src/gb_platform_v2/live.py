@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .data.clients import ElexonClient
+from .data.elexon import ElexonClient
 from .data.parsers import parse_elexon_mid
 from .features import add_cyclical_time_features, add_weather_features
 from .live_store import append_actuals, append_forecasts, grade_forecasts
@@ -41,11 +41,9 @@ def run_and_log_forecast(
     prices.index = pd.to_datetime(prices.index, utc=True)
     prices = prices.rename_axis("delivery_time_utc").reset_index()
     prices["model_version"] = model_version
-    prices["issue_time_utc"] = pd.Timestamp(issue_time_utc)
-    if prices["issue_time_utc"].dt.tz is None:
-        prices["issue_time_utc"] = prices["issue_time_utc"].dt.tz_localize("UTC")
-    else:
-        prices["issue_time_utc"] = prices["issue_time_utc"].dt.tz_convert("UTC")
+    issue = pd.Timestamp(issue_time_utc)
+    issue = issue.tz_localize("UTC") if issue.tzinfo is None else issue.tz_convert("UTC")
+    prices["issue_time_utc"] = issue
     append_forecasts(
         prices[
             [
