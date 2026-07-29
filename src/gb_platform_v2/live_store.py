@@ -21,6 +21,17 @@ def _read(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(file) if file.exists() else pd.DataFrame()
 
 
+def _normalise_key_values(frame: pd.DataFrame, key: list[str]) -> pd.DataFrame:
+    out = frame.copy()
+    for column in key:
+        if column.endswith("_utc"):
+            parsed = pd.to_datetime(out[column], utc=True, errors="raise")
+            out[column] = parsed.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            out[column] = out[column].astype(str)
+    return out
+
+
 def _append_unique(
     new_rows: pd.DataFrame,
     path: str | Path,
@@ -30,7 +41,11 @@ def _append_unique(
     if missing:
         raise KeyError(f"Missing immutable key columns: {missing}")
     existing = _read(path)
-    combined = pd.concat([existing, new_rows], ignore_index=True)
+    new_normalised = _normalise_key_values(new_rows, key)
+    existing_normalised = (
+        _normalise_key_values(existing, key) if not existing.empty else existing.copy()
+    )
+    combined = pd.concat([existing_normalised, new_normalised], ignore_index=True)
     duplicates = combined.duplicated(subset=key, keep=False)
     if duplicates.any():
         duplicate_rows = combined.loc[duplicates, key].drop_duplicates().to_dict("records")
@@ -49,9 +64,9 @@ def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
         out["forecast_id"] = (
             out["model_version"].astype(str)
             + "|"
-            + out["issue_time_utc"].astype(str)
+            + out["issue_time_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
             + "|"
-            + out["delivery_time_utc"].astype(str)
+            + out["delivery_time_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         )
     return _append_unique(out, path, FORECAST_KEY)
 
@@ -82,7 +97,7 @@ def grade_forecasts(
     scores = pd.DataFrame(
         {
             "forecast_id": joined["forecast_id"],
-            "actual_revision": joined["actual_revision"],
+            "actual_revision": joined["actual_revision"].astype(str),
             "delivery_time_utc": joined["delivery_time_utc"],
             "error": joined["p50"] - joined["actual_price"],
             "absolute_error": (joined["p50"] - joined["actual_price"]).abs(),
@@ -98,6 +113,7 @@ def grade_forecasts(
     )
     existing = _read(scores_path)
     if not existing.empty:
+        existing["actual_revision"] = existing["actual_revision"].astype(str)
         existing_keys = set(zip(existing["forecast_id"], existing["actual_revision"]))
         keep = [
             (forecast_id, revision) not in existing_keys
