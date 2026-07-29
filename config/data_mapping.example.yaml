@@ -1,10 +1,12 @@
-# Copy to config/data_mapping.yaml and replace every REQUIRED value.
-# The builder fails instead of inventing missing operational variables.
+# Copy to config/data_mapping.yaml after downloading the listed datasets.
+# Review the two FUELHH column names and the BM-unit storage mapping before training.
 
 paths:
   elexon_price: data/parsed/elexon/elexon_mid.parquet
   elexon_demand: data/parsed/elexon/elexon_demand.parquet
   elexon_fuel: data/parsed/elexon/elexon_fuelhh.parquet
+  elexon_interconnectors: data/parsed/elexon/elexon_interconnectors.parquet
+  elexon_storage: data/parsed/elexon/elexon_storage.parquet
   neso_embedded: data/parsed/neso/embedded.parquet
   neso_inertia: data/parsed/neso/inertia.parquet
   weather_demand: data/parsed/weather/demand.parquet
@@ -12,33 +14,31 @@ paths:
   weather_solar: data/parsed/weather/solar.parquet
 
 columns:
-  # Parsed Elexon columns
   demand_mw: demand_mw
   price_gbp_mwh: price_gbp_mwh
 
-  # Check the actual FUELHH pivoted names produced in your downloaded file.
+  # Run collect-elexon, inspect elexon_fuelhh.parquet, then enter the exact names.
   transmission_wind_mw: REQUIRED_FUEL_WIND_COLUMN
   nuclear_mw: REQUIRED_FUEL_NUCLEAR_COLUMN
 
-  # NESO embedded forecast/outturn archive columns after normalisation.
-  embedded_timestamp: REQUIRED_EMBEDDED_TIMESTAMP_COLUMN
-  embedded_wind_mw: REQUIRED_EMBEDDED_WIND_COLUMN
-  embedded_solar_mw: REQUIRED_EMBEDDED_SOLAR_COLUMN
-  embedded_published_at: REQUIRED_EMBEDDED_PUBLICATION_COLUMN
+  # The preset NESO parsers create these standard fields.
+  embedded_timestamp: timestamp
+  embedded_wind_mw: embedded_wind_mw
+  embedded_solar_mw: embedded_solar_mw
+  embedded_published_at: published_at_utc
 
-  # NESO inertia columns after normalisation.
-  inertia_timestamp: REQUIRED_INERTIA_TIMESTAMP_COLUMN
-  inertia_gvas: REQUIRED_OUTTURN_OR_MARKET_INERTIA_COLUMN
+  inertia_timestamp: timestamp
+  inertia_gvas: outturn_inertia_gvas
 
 optional_columns:
-  net_import_mw: null
-  battery_net_mw: null
+  net_import_mw: net_import_mw
+  battery_net_mw: battery_net_mw
   curtailed_wind_mw: null
   curtailed_solar_mw: null
   nuclear_available_mw: null
   nuclear_outage_mw: null
 
 issue_time:
-  # Historical reconstruction assumes a fixed D-1 issue time.
+  # Historical reconstruction assumes one fixed D-1 issue time.
   local_hour: 13
   local_minute: 0
