@@ -12,10 +12,10 @@ class ElexonClient:
         self.base_url = "https://data.elexon.co.uk/bmrs/api/v1"
         self.timeout = timeout
 
-    def _get(self, path: str, params: dict[str, object]) -> Any:
+    def _get(self, path: str, params: dict[str, object] | None = None) -> Any:
         response = requests.get(
             f"{self.base_url}/{path.lstrip('/')}",
-            params=params,
+            params=params or {},
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -50,6 +50,12 @@ class ElexonClient:
             "generation/outturn/interconnectors",
             {"settlementDateFrom": start, "settlementDateTo": end},
         )
+
+    def actual_generation_per_unit(self, start: str, end: str) -> Any:
+        return self.dataset_stream("B1610", {"from": start, "to": end})
+
+    def bm_units(self) -> Any:
+        return self._get("reference/bmunits/all")
 
     def physical_notifications(self, start: str, end: str) -> Any:
         return self.dataset_stream("PN", {"from": start, "to": end})
