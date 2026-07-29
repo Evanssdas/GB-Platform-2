@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gb-power-market-platform-v2"
+version = "0.1.0"
+description = "Half-hourly probabilistic GB power-market research platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "scikit-learn>=1.5",
+  "lightgbm>=4.5",
+  "requests>=2.32",
+  "PyYAML>=6.0",
+  "matplotlib>=3.9",
+  "joblib>=1.4",
+  "holidays>=0.52",
+  "pyarrow>=17.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.6"]
+
+[project.scripts]
+gb-v2 = "gb_platform_v2.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
