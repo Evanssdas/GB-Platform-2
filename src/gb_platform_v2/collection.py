@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from .data.clients import ElexonClient, NesoCkanClient, OpenMeteoClient
+from .data.clients import NesoCkanClient, OpenMeteoClient
+from .data.elexon import ElexonClient
 from .data.parsers import (
     parse_elexon_demand,
     parse_elexon_fuelhh,
+    parse_elexon_interconnectors,
     parse_elexon_mid,
     parse_neso_records,
     parse_open_meteo_hourly,
@@ -45,18 +47,34 @@ def collect_elexon_core(
     output_dir: str | Path,
     chunk_days: int = 30,
 ) -> dict[str, Path]:
-    """Collect and parse APXMIDP, national demand and fuel-type generation."""
+    """Collect APXMIDP, demand, fuel generation and interconnector outturn."""
     client = ElexonClient()
     price_frames: list[pd.DataFrame] = []
     demand_frames: list[pd.DataFrame] = []
     fuel_frames: list[pd.DataFrame] = []
+    interconnector_frames: list[pd.DataFrame] = []
 
     for chunk_start, chunk_end in _date_chunks(start, end, chunk_days):
-        start_text = chunk_start.strftime("%Y-%m-%d")
-        end_text = (chunk_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        price_frames.append(parse_elexon_mid(client.market_index(start_text, end_text)))
-        demand_frames.append(parse_elexon_demand(client.national_demand(start_text, end_text)))
-        fuel_frames.append(parse_elexon_fuelhh(client.fuel_half_hourly(start_text, end_text)))
+        settlement_start = chunk_start.strftime("%Y-%m-%d")
+        settlement_end = chunk_end.strftime("%Y-%m-%d")
+        exclusive_end = (chunk_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        publish_start = f"{settlement_start}T00:00:00Z"
+        publish_end = f"{exclusive_end}T00:00:00Z"
+
+        price_frames.append(
+            parse_elexon_mid(client.market_index(settlement_start, exclusive_end))
+        )
+        demand_frames.append(
+            parse_elexon_demand(client.national_demand(publish_start, publish_end))
+        )
+        fuel_frames.append(
+            parse_elexon_fuelhh(client.fuel_half_hourly(settlement_start, settlement_end))
+        )
+        interconnector_frames.append(
+            parse_elexon_interconnectors(
+                client.interconnector_outturn(settlement_start, settlement_end)
+            )
+        )
 
     output = Path(output_dir)
     paths = {
@@ -71,6 +89,12 @@ def collect_elexon_core(
         "fuel": _save_frame(
             pd.concat(fuel_frames, ignore_index=True).drop_duplicates("timestamp", keep="last"),
             output / "elexon_fuelhh.parquet",
+        ),
+        "interconnectors": _save_frame(
+            pd.concat(interconnector_frames, ignore_index=True).drop_duplicates(
+                "timestamp", keep="last"
+            ),
+            output / "elexon_interconnectors.parquet",
         ),
     }
     return paths
