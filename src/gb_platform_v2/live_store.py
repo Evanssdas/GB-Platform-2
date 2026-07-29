@@ -56,6 +56,28 @@ def _append_unique(
     return combined
 
 
+def _append_new_rows(
+    new_rows: pd.DataFrame,
+    path: str | Path,
+    key: list[str],
+) -> pd.DataFrame:
+    """Append unseen keys and silently skip identical rerun keys."""
+    existing = _read(path)
+    incoming = _normalise_key_values(new_rows, key)
+    if not existing.empty:
+        existing = _normalise_key_values(existing, key)
+        existing_keys = set(map(tuple, existing[key].itertuples(index=False, name=None)))
+        keep = [tuple(row) not in existing_keys for row in incoming[key].itertuples(index=False, name=None)]
+        incoming = incoming.loc[keep]
+    if incoming.empty:
+        return incoming
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    file = Path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(file, index=False)
+    return combined
+
+
 def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
     out = rows.copy()
     out["issue_time_utc"] = pd.to_datetime(out["issue_time_utc"], utc=True)
@@ -74,7 +96,7 @@ def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
 def append_actuals(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
     out = rows.copy()
     out["delivery_time_utc"] = pd.to_datetime(out["delivery_time_utc"], utc=True)
-    return _append_unique(out, path, ACTUAL_KEY)
+    return _append_new_rows(out, path, ACTUAL_KEY)
 
 
 def grade_forecasts(
@@ -111,15 +133,4 @@ def grade_forecasts(
             "graded_at_utc": pd.Timestamp.now(tz="UTC"),
         }
     )
-    existing = _read(scores_path)
-    if not existing.empty:
-        existing["actual_revision"] = existing["actual_revision"].astype(str)
-        existing_keys = set(zip(existing["forecast_id"], existing["actual_revision"]))
-        keep = [
-            (forecast_id, revision) not in existing_keys
-            for forecast_id, revision in zip(scores["forecast_id"], scores["actual_revision"])
-        ]
-        scores = scores.loc[keep]
-    if scores.empty:
-        return scores
-    return _append_unique(scores, scores_path, SCORE_KEY)
+    return _append_new_rows(scores, scores_path, SCORE_KEY)
