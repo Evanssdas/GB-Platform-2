@@ -42,6 +42,17 @@ def _issue_time_for_delivery(timestamp: pd.Series, hour: int, minute: int) -> pd
     return issue_local.dt.tz_convert("UTC")
 
 
+def _align_weather(weather: pd.DataFrame, target_timestamps: pd.Series) -> pd.DataFrame:
+    """Interpolate hourly weather onto the 30-minute settlement clock."""
+    values = _timestamp(weather).set_index("timestamp").sort_index()
+    numeric = values.select_dtypes(include="number")
+    target_index = pd.DatetimeIndex(pd.to_datetime(target_timestamps, utc=True)).sort_values()
+    union = numeric.index.union(target_index).sort_values()
+    aligned = numeric.reindex(union).interpolate(method="time").reindex(target_index)
+    aligned.index.name = "timestamp"
+    return aligned.reset_index()
+
+
 def build_half_hourly_dataset(
     mapping_path: str | Path,
     output_path: str | Path,
@@ -53,20 +64,20 @@ def build_half_hourly_dataset(
     columns = config["columns"]
     optional = config.get("optional_columns", {})
 
-    price = _timestamp(_read(paths["elexon_price"]))
-    demand = _timestamp(_read(paths["elexon_demand"]))
-    fuel = _timestamp(_read(paths["elexon_fuel"]))
+    loaded = {name: _read(path) for name, path in paths.items()}
+    price = _timestamp(loaded["elexon_price"])
+    demand = _timestamp(loaded["elexon_demand"])
+    fuel = _timestamp(loaded["elexon_fuel"])
 
-    base = price[["timestamp", _required(columns, "price_gbp_mwh")]].rename(
-        columns={_required(columns, "price_gbp_mwh"): "price_gbp_mwh"}
-    )
+    price_column = _required(columns, "price_gbp_mwh")
+    demand_column = _required(columns, "demand_mw")
+    base = price[["timestamp", price_column]].rename(columns={price_column: "price_gbp_mwh"})
     base = base.merge(
-        demand[["timestamp", _required(columns, "demand_mw")]].rename(
-            columns={_required(columns, "demand_mw"): "demand_mw"}
-        ),
+        demand[["timestamp", demand_column]].rename(columns={demand_column: "demand_mw"}),
         on="timestamp",
         how="inner",
     )
+
     fuel_columns = {
         _required(columns, "transmission_wind_mw"): "transmission_wind_mw",
         _required(columns, "nuclear_mw"): "nuclear_mw",
@@ -80,11 +91,13 @@ def build_half_hourly_dataset(
         how="inner",
     )
 
-    embedded = _read(paths["neso_embedded"])
+    embedded = loaded["neso_embedded"].copy()
     embedded_timestamp = _required(columns, "embedded_timestamp")
     embedded_publish = _required(columns, "embedded_published_at")
     embedded = _timestamp(embedded, embedded_timestamp)
-    embedded[embedded_publish] = pd.to_datetime(embedded[embedded_publish], utc=True, errors="coerce")
+    embedded[embedded_publish] = pd.to_datetime(
+        embedded[embedded_publish], utc=True, errors="coerce"
+    )
     embedded = embedded.rename(columns={embedded_timestamp: "timestamp"})
 
     issue_settings = config.get("issue_time", {})
@@ -95,31 +108,38 @@ def build_half_hourly_dataset(
     )
 
     selected_embedded: list[pd.DataFrame] = []
-    for issue_time, group in base.groupby("issue_time_utc", sort=True):
+    for issue_time, delivery_group in base.groupby("issue_time_utc", sort=True):
         eligible = select_latest_available(
             embedded,
             issue_time,
             delivery_columns=["timestamp"],
             published_column=embedded_publish,
         )
-        selected_embedded.append(eligible)
+        delivery_times = set(delivery_group["timestamp"])
+        selected_embedded.append(eligible.loc[eligible["timestamp"].isin(delivery_times)])
     embedded_asof = pd.concat(selected_embedded, ignore_index=True).drop_duplicates(
         "timestamp", keep="last"
     )
+
     embedded_columns = {
         _required(columns, "embedded_wind_mw"): "embedded_wind_mw",
         _required(columns, "embedded_solar_mw"): "embedded_solar_mw",
     }
+    absent = [column for column in embedded_columns if column not in embedded_asof]
+    if absent:
+        raise KeyError(f"Mapped embedded columns are absent: {absent}")
     base = base.merge(
         embedded_asof[["timestamp", *embedded_columns]].rename(columns=embedded_columns),
         on="timestamp",
         how="left",
     )
 
-    inertia = _read(paths["neso_inertia"])
+    inertia = loaded["neso_inertia"].copy()
     inertia_timestamp = _required(columns, "inertia_timestamp")
     inertia = _timestamp(inertia, inertia_timestamp).rename(columns={inertia_timestamp: "timestamp"})
     inertia_value = _required(columns, "inertia_gvas")
+    if inertia_value not in inertia:
+        raise KeyError(f"Mapped inertia column is absent: {inertia_value}")
     base = base.merge(
         inertia[["timestamp", inertia_value]].rename(columns={inertia_value: "inertia_gvas"}),
         on="timestamp",
@@ -127,7 +147,7 @@ def build_half_hourly_dataset(
     )
 
     for weather_path in ("weather_demand", "weather_wind", "weather_solar"):
-        weather = _timestamp(_read(paths[weather_path]))
+        weather = _align_weather(loaded[weather_path], base["timestamp"])
         value_columns = [column for column in weather.columns if column != "timestamp"]
         base = base.merge(weather[["timestamp", *value_columns]], on="timestamp", how="left")
 
@@ -142,8 +162,7 @@ def build_half_hourly_dataset(
         source_column = optional.get(target)
         if source_column:
             found = None
-            for candidate_path in paths.values():
-                candidate = _read(candidate_path)
+            for candidate in loaded.values():
                 if source_column in candidate and "timestamp" in candidate:
                     found = _timestamp(candidate)[["timestamp", source_column]].rename(
                         columns={source_column: target}
@@ -172,7 +191,9 @@ def build_half_hourly_dataset(
     ]
     missing_counts = base[required_targets].isna().sum()
     if missing_counts.any():
-        raise ValueError(f"Required target gaps remain: {missing_counts[missing_counts.gt(0)].to_dict()}")
+        raise ValueError(
+            f"Required target gaps remain: {missing_counts[missing_counts.gt(0)].to_dict()}"
+        )
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
