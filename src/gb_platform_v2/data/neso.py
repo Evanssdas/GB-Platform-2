@@ -10,7 +10,11 @@ NESO_RESOURCES = {
     "embedded_current": "db6c038f-98af-4570-ab60-24d71ebd0ae5",
     "embedded_2026_h1": "d6375700-69c2-4c25-8bde-883a205d742e",
     "embedded_2025": "fc13df13-2dad-4a1c-b9e3-4569efba4955",
+    "embedded_2024": "06abd00a-ef6b-488b-9b6d-5e08fdc0c890",
     "inertia_2026_27": "3ff8b466-5c16-4713-abfe-ad332298f15f",
+    "inertia_2025_26": "936daa4f-fca4-4c6a-968a-884f3d77bafe",
+    "inertia_2024_25": "7a12d0bd-448d-42a9-b333-4a32761dbad4",
+    "historic_demand_2025": "b2bde559-3455-4021-b179-dfe60c0337b0",
     "inertia_cost": "6295f4ed-b43d-4a80-8ca9-c27c9fa16517",
 }
 
@@ -26,13 +30,18 @@ def _normalise_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _settlement_timestamp(date: pd.Series, period: pd.Series) -> pd.Series:
     values: list[pd.Timestamp] = []
-    for day, sp in zip(pd.to_datetime(date, errors="coerce"), pd.to_numeric(period, errors="coerce")):
+    for day, sp in zip(
+        pd.to_datetime(date, errors="coerce"),
+        pd.to_numeric(period, errors="coerce"),
+    ):
         if pd.isna(day) or pd.isna(sp):
             values.append(pd.NaT)
             continue
         periods = settlement_periods_for_day(pd.Timestamp(day).normalize())
         position = int(sp) - 1
-        values.append(periods[position].tz_convert("UTC") if 0 <= position < len(periods) else pd.NaT)
+        values.append(
+            periods[position].tz_convert("UTC") if 0 <= position < len(periods) else pd.NaT
+        )
     return pd.Series(pd.DatetimeIndex(values), index=date.index)
 
 
@@ -53,8 +62,12 @@ def parse_embedded_forecasts(records: list[dict]) -> pd.DataFrame:
             "timestamp": _settlement_timestamp(
                 frame["settlement_date"], frame["settlement_period"]
             ),
-            "settlement_date": pd.to_datetime(frame["settlement_date"], errors="coerce").dt.date,
-            "settlement_period": pd.to_numeric(frame["settlement_period"], errors="coerce"),
+            "settlement_date": pd.to_datetime(
+                frame["settlement_date"], errors="coerce"
+            ).dt.date,
+            "settlement_period": pd.to_numeric(
+                frame["settlement_period"], errors="coerce"
+            ),
             "embedded_wind_mw": pd.to_numeric(
                 frame["embedded_wind_forecast"], errors="coerce"
             ),
