@@ -13,6 +13,7 @@ from .collection import (
     collect_neso_resource,
     collect_previous_run_weather,
 )
+from .dataset_builder import build_half_hourly_dataset
 from .features import add_cyclical_time_features, add_system_balance_features, add_weather_features
 from .live_store import grade_forecasts
 from .pipeline import forecast_platform, train_platform
@@ -105,6 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
         ],
     )
 
+    dataset = sub.add_parser("build-dataset", help="Assemble the mapped half-hourly table")
+    dataset.add_argument("--mapping", default="config/data_mapping.yaml")
+    dataset.add_argument("--output", default="data/processed/gb_half_hourly.parquet")
+
     grade = sub.add_parser("grade", help="Append scores without overwriting forecasts")
     grade.add_argument("--forecasts", required=True)
     grade.add_argument("--actuals", required=True)
@@ -144,6 +149,9 @@ def main() -> None:
                 args.output,
             )
         )
+    elif args.command == "build-dataset":
+        frame = build_half_hourly_dataset(args.mapping, args.output)
+        print({"rows": len(frame), "output": args.output})
     elif args.command == "grade":
         result = grade_forecasts(args.forecasts, args.actuals, args.scores)
         print({"rows_appended": len(result)})
