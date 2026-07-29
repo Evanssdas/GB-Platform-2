@@ -15,6 +15,7 @@ from .collection import (
 )
 from .dataset_builder import build_half_hourly_dataset
 from .features import add_cyclical_time_features, add_system_balance_features, add_weather_features
+from .live import collect_and_append_price_actuals, run_and_log_forecast
 from .live_store import grade_forecasts
 from .pipeline import forecast_platform, train_platform
 from .synthetic import make_synthetic_history
@@ -70,6 +71,18 @@ def build_parser() -> argparse.ArgumentParser:
     forecast.add_argument("--output", required=True)
     forecast.add_argument("--scenarios", type=int, default=1000)
 
+    live_forecast = sub.add_parser(
+        "live-forecast",
+        help="Run a frozen model and append immutable probabilistic forecasts",
+    )
+    live_forecast.add_argument("--input", required=True)
+    live_forecast.add_argument("--models", required=True)
+    live_forecast.add_argument("--output", required=True)
+    live_forecast.add_argument("--forecasts", default="live/forecasts.csv")
+    live_forecast.add_argument("--model-version", required=True)
+    live_forecast.add_argument("--issue-time-utc", required=True)
+    live_forecast.add_argument("--scenarios", type=int, default=1000)
+
     demo = sub.add_parser("demo", help="Run a complete synthetic demonstration")
     demo.add_argument("--days", type=int, default=220)
     demo.add_argument("--scenarios", type=int, default=1000)
@@ -81,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     elexon.add_argument("--end", required=True)
     elexon.add_argument("--output", default="data/parsed/elexon")
     elexon.add_argument("--chunk-days", type=int, default=30)
+
+    actuals = sub.add_parser("collect-actuals", help="Append APXMIDP actual prices")
+    actuals.add_argument("--start", required=True)
+    actuals.add_argument("--end", required=True)
+    actuals.add_argument("--actuals", default="live/actuals.csv")
+    actuals.add_argument("--revision", default="initial")
 
     neso = sub.add_parser("collect-neso", help="Collect one configured NESO CKAN resource")
     neso.add_argument("--resource-id", required=True)
@@ -133,8 +152,28 @@ def main() -> None:
         frame = _prepare(_load_frame(args.input))
         report = forecast_platform(frame, args.models, args.output, args.scenarios)
         print(report)
+    elif args.command == "live-forecast":
+        print(
+            run_and_log_forecast(
+                args.input,
+                args.models,
+                args.output,
+                args.forecasts,
+                args.model_version,
+                args.issue_time_utc,
+                args.scenarios,
+            )
+        )
     elif args.command == "collect-elexon":
         print(collect_elexon_core(args.start, args.end, args.output, args.chunk_days))
+    elif args.command == "collect-actuals":
+        result = collect_and_append_price_actuals(
+            args.start,
+            args.end,
+            args.actuals,
+            args.revision,
+        )
+        print({"rows": len(result)})
     elif args.command == "collect-neso":
         print(collect_neso_resource(args.resource_id, args.output))
     elif args.command == "collect-weather":
