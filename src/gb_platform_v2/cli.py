@@ -10,6 +10,8 @@ import yaml
 
 from .collection import (
     collect_elexon_core,
+    collect_elexon_units,
+    collect_neso_preset,
     collect_neso_resource,
     collect_previous_run_weather,
 )
@@ -23,10 +25,7 @@ from .synthetic import make_synthetic_history
 
 def _load_frame(path: str) -> pd.DataFrame:
     source = Path(path)
-    if source.suffix == ".parquet":
-        frame = pd.read_parquet(source)
-    else:
-        frame = pd.read_csv(source)
+    frame = pd.read_parquet(source) if source.suffix == ".parquet" else pd.read_csv(source)
     if "timestamp" not in frame:
         raise KeyError("Input must contain a timestamp column")
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
@@ -89,11 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--models", default="models/demo")
     demo.add_argument("--output", default="outputs/demo")
 
-    elexon = sub.add_parser("collect-elexon", help="Collect raw half-hourly Elexon core data")
+    elexon = sub.add_parser("collect-elexon", help="Collect half-hourly Elexon core data")
     elexon.add_argument("--start", required=True)
     elexon.add_argument("--end", required=True)
     elexon.add_argument("--output", default="data/parsed/elexon")
     elexon.add_argument("--chunk-days", type=int, default=30)
+
+    units = sub.add_parser("collect-elexon-units", help="Collect B1610 and BM-unit metadata")
+    units.add_argument("--start", required=True)
+    units.add_argument("--end", required=True)
+    units.add_argument("--output", default="data/parsed/elexon")
+    units.add_argument("--chunk-days", type=int, default=30)
 
     actuals = sub.add_parser("collect-actuals", help="Append APXMIDP actual prices")
     actuals.add_argument("--start", required=True)
@@ -101,9 +106,23 @@ def build_parser() -> argparse.ArgumentParser:
     actuals.add_argument("--actuals", default="live/actuals.csv")
     actuals.add_argument("--revision", default="initial")
 
-    neso = sub.add_parser("collect-neso", help="Collect one configured NESO CKAN resource")
+    neso = sub.add_parser("collect-neso", help="Collect one NESO CKAN resource")
     neso.add_argument("--resource-id", required=True)
     neso.add_argument("--output", required=True)
+
+    neso_preset = sub.add_parser("collect-neso-preset", help="Collect a known NESO dataset")
+    neso_preset.add_argument(
+        "--name",
+        choices=[
+            "embedded_current",
+            "embedded_2026_h1",
+            "embedded_2025",
+            "inertia_2026_27",
+            "inertia_cost",
+        ],
+        required=True,
+    )
+    neso_preset.add_argument("--output", required=True)
 
     weather = sub.add_parser(
         "collect-weather",
@@ -141,17 +160,17 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command == "train":
         frame = _prepare(_load_frame(args.input))
-        metrics = train_platform(
-            frame,
-            args.models,
-            args.holdout_rows,
-            args.time_series_splits,
+        print(
+            train_platform(
+                frame,
+                args.models,
+                args.holdout_rows,
+                args.time_series_splits,
+            )
         )
-        print(metrics)
     elif args.command == "forecast":
         frame = _prepare(_load_frame(args.input))
-        report = forecast_platform(frame, args.models, args.output, args.scenarios)
-        print(report)
+        print(forecast_platform(frame, args.models, args.output, args.scenarios))
     elif args.command == "live-forecast":
         print(
             run_and_log_forecast(
@@ -166,6 +185,8 @@ def main() -> None:
         )
     elif args.command == "collect-elexon":
         print(collect_elexon_core(args.start, args.end, args.output, args.chunk_days))
+    elif args.command == "collect-elexon-units":
+        print(collect_elexon_units(args.start, args.end, args.output, args.chunk_days))
     elif args.command == "collect-actuals":
         result = collect_and_append_price_actuals(
             args.start,
@@ -176,12 +197,13 @@ def main() -> None:
         print({"rows": len(result)})
     elif args.command == "collect-neso":
         print(collect_neso_resource(args.resource_id, args.output))
+    elif args.command == "collect-neso-preset":
+        print(collect_neso_preset(args.name, args.output))
     elif args.command == "collect-weather":
         settings = _config(args.config)
-        sites = settings["weather_sites"][args.group]
         print(
             collect_previous_run_weather(
-                sites,
+                settings["weather_sites"][args.group],
                 args.variables,
                 args.start,
                 args.end,
@@ -212,8 +234,7 @@ def main() -> None:
             "marginal_technology",
         ]:
             future = future.drop(columns=[column], errors="ignore")
-        report = forecast_platform(future, args.models, args.output, args.scenarios)
-        print(report)
+        print(forecast_platform(future, args.models, args.output, args.scenarios))
 
 
 if __name__ == "__main__":
