@@ -16,6 +16,7 @@ from .models import (
 from .reporting import daily_price_summary, plot_price_fan_chart, write_json
 from .risk import scenario_risk
 from .scenarios import bootstrap_error_scenarios, run_price_monte_carlo
+from .validation import expanding_oof_predictions
 
 COMPONENT_TARGETS = [
     "demand_mw",
@@ -28,17 +29,12 @@ COMPONENT_TARGETS = [
     "inertia_gvas",
 ]
 
-TARGET_DERIVED_COLUMNS = {
+DERIVED_TARGET_COLUMNS = {
     "total_wind_mw",
     "renewable_mw",
     "residual_before_nuclear_mw",
     "residual_after_nuclear_mw",
     "net_system_short_mw",
-    "wind_potential_mw",
-    "solar_potential_mw",
-    "nuclear_modulation_mw",
-    "curtailed_wind_mw",
-    "curtailed_solar_mw",
 }
 
 NON_FEATURE_COLUMNS = {
@@ -49,16 +45,39 @@ NON_FEATURE_COLUMNS = {
     "price_gbp_mwh",
     "marginal_technology",
     *COMPONENT_TARGETS,
-    *TARGET_DERIVED_COLUMNS,
+    *DERIVED_TARGET_COLUMNS,
 }
+
+
+def _add_stacked_balance_features(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out["total_wind_mw"] = out["embedded_wind_mw"] + out["transmission_wind_mw"]
+    out["renewable_mw"] = out["total_wind_mw"] + out["embedded_solar_mw"]
+    out["residual_before_nuclear_mw"] = out["demand_mw"] - out["renewable_mw"]
+    out["residual_after_nuclear_mw"] = (
+        out["residual_before_nuclear_mw"] - out["nuclear_mw"]
+    )
+    out["net_system_short_mw"] = (
+        out["residual_after_nuclear_mw"]
+        - out["net_import_mw"]
+        - out["battery_net_mw"]
+    )
+    return out
 
 
 def train_platform(
     frame: pd.DataFrame,
     model_dir: str | Path,
     holdout_rows: int = 4320,
+    time_series_splits: int = 5,
 ) -> dict:
-    """Train component and price models using chronologically safe features."""
+    """Train component and price models without using realised components in stacking.
+
+    Component models are evaluated chronologically and saved after fitting on all
+    available rows. The price model is trained on expanding-window out-of-fold
+    component predictions, matching the fact that live price forecasts receive
+    predicted rather than realised system components.
+    """
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     features = choose_numeric_features(frame, NON_FEATURE_COLUMNS)
@@ -67,18 +86,28 @@ def train_platform(
 
     metrics: dict[str, dict] = {}
     component_errors = pd.DataFrame(index=frame.index)
+    stacked = pd.DataFrame(index=frame.index)
 
     for target in COMPONENT_TARGETS:
         metrics[target] = chronological_holdout_score(
+            frame, features, target, holdout_rows, transform="identity"
+        )
+        oof = expanding_oof_predictions(
             frame,
             features,
             target,
-            holdout_rows,
-            transform="identity",
+            n_splits=time_series_splits,
         )
-        fitted = train_regressor(frame, features, target)
-        fitted.save(model_dir / f"{target}.joblib")
-        component_errors[target] = frame[target] - fitted.predict(frame)
+        stacked[target] = oof
+        component_errors[target] = frame[target] - oof
+
+        final_model = train_regressor(frame, features, target)
+        final_model.save(model_dir / f"{target}.joblib")
+
+    price_training = frame.drop(columns=list(COMPONENT_TARGETS), errors="ignore").copy()
+    for target in COMPONENT_TARGETS:
+        price_training[target] = stacked[target]
+    price_training = _add_stacked_balance_features(price_training)
 
     price_features = [
         *features,
@@ -90,10 +119,11 @@ def train_platform(
         "net_system_short_mw",
     ]
     price_features = list(
-        dict.fromkeys(column for column in price_features if column in frame.columns)
+        dict.fromkeys(column for column in price_features if column in price_training.columns)
     )
+
     metrics["price_gbp_mwh"] = chronological_holdout_score(
-        frame,
+        price_training,
         price_features,
         "price_gbp_mwh",
         holdout_rows,
@@ -101,7 +131,7 @@ def train_platform(
         scale=50.0,
     )
     price_model = train_regressor(
-        frame,
+        price_training,
         price_features,
         "price_gbp_mwh",
         transform="arcsinh",
@@ -109,22 +139,28 @@ def train_platform(
     )
     price_model.save(model_dir / "price_gbp_mwh.joblib")
 
-    if "marginal_technology" in frame.columns:
-        import joblib
+    if "marginal_technology" in price_training.columns:
+        marginal_frame = price_training.dropna(subset=[*price_features, "marginal_technology"])
+        if not marginal_frame.empty:
+            marginal = train_marginal_technology_model(
+                marginal_frame,
+                price_features,
+                "marginal_technology",
+            )
+            import joblib
 
-        marginal = train_marginal_technology_model(
-            frame,
-            price_features,
-            "marginal_technology",
-        )
-        joblib.dump(marginal, model_dir / "marginal_technology.joblib")
+            joblib.dump(marginal, model_dir / "marginal_technology.joblib")
 
-    component_errors.to_parquet(model_dir / "historical_component_errors.parquet")
+    component_errors.dropna(how="any").to_parquet(
+        model_dir / "historical_component_errors.parquet"
+    )
     write_json(
         {
             "features": features,
             "price_features": price_features,
             "metrics": metrics,
+            "stacking": "expanding_window_out_of_fold",
+            "time_series_splits": time_series_splits,
         },
         model_dir / "metadata.json",
     )
@@ -138,7 +174,6 @@ def forecast_platform(
     scenarios: int = 1000,
     position_mwh: float = 100.0,
 ) -> dict:
-    """Create point and probabilistic half-hourly forecasts."""
     model_dir = Path(model_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -148,17 +183,7 @@ def forecast_platform(
         model = TrainedRegressor.load(model_dir / f"{target}.joblib")
         point[target] = model.predict(point)
 
-    point["total_wind_mw"] = point["embedded_wind_mw"] + point["transmission_wind_mw"]
-    point["renewable_mw"] = point["total_wind_mw"] + point["embedded_solar_mw"]
-    point["residual_before_nuclear_mw"] = point["demand_mw"] - point["renewable_mw"]
-    point["residual_after_nuclear_mw"] = (
-        point["residual_before_nuclear_mw"] - point["nuclear_mw"]
-    )
-    point["net_system_short_mw"] = (
-        point["residual_after_nuclear_mw"]
-        - point["net_import_mw"]
-        - point["battery_net_mw"]
-    )
+    point = _add_stacked_balance_features(point)
 
     price_model = TrainedRegressor.load(model_dir / "price_gbp_mwh.joblib")
     point["price_point_gbp_mwh"] = price_model.predict(point)
