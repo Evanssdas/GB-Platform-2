@@ -37,6 +37,8 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Collect ENTSO-E products
+        id: collect_entsoe
+        continue-on-error: true
         run: >-
           python -m gb_platform_v2.entsoe_cli
           --config config/entsoe.yaml
@@ -44,11 +46,25 @@ jobs:
           --end "${{ inputs.end_utc }}"
           --output data/parsed/entsoe
       - name: Summarise without exposing credentials
+        if: always()
         shell: bash
         run: |
-          find data/parsed/entsoe -maxdepth 1 -type f -printf '%f %s bytes\n'
-      - uses: actions/upload-artifact@v4
+          if [ -d data/parsed/entsoe ]; then
+            find data/parsed/entsoe -maxdepth 1 -type f -printf '%f %s bytes\n'
+          else
+            echo "No ENTSO-E output directory was created"
+          fi
+      - name: Upload ENTSO-E data and status
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
           name: entsoe-${{ inputs.start_utc }}-${{ inputs.end_utc }}
           path: data/parsed/entsoe
+          if-no-files-found: warn
           retention-days: 30
+      - name: Fail job when no usable ENTSO-E data were collected
+        if: steps.collect_entsoe.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "ENTSO-E collection produced no usable datasets. Download collection_status.json from the artifact for safe diagnostics."
+          exit 1
