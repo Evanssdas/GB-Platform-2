@@ -1,0 +1,312 @@
+name: Build core model smoke test V1
+run-name: Core model smoke ${{ inputs.start_date }} to ${{ inputs.end_date }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: Inclusive first GB settlement date YYYY-MM-DD
+        required: true
+        default: "2025-07-01"
+      end_date:
+        description: Exclusive final GB settlement date YYYY-MM-DD
+        required: true
+        default: "2025-08-01"
+      embedded_preset:
+        description: Matching NESO embedded forecast resource
+        required: true
+        type: choice
+        options:
+          - embedded_2024
+          - embedded_2025
+          - embedded_2026_h1
+        default: embedded_2025
+      inertia_preset:
+        description: Matching NESO inertia resource
+        required: true
+        type: choice
+        options:
+          - inertia_2024_25
+          - inertia_2025_26
+          - inertia_2026_27
+        default: inertia_2025_26
+      holdout_rows:
+        description: Chronological holdout periods for this smoke test
+        required: true
+        default: "240"
+      time_series_splits:
+        description: Expanding-window OOF splits
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-model-smoke-${{ inputs.start_date }}-${{ inputs.end_date }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Bootstrap diagnostics
+        shell: bash
+        run: |
+          mkdir -p data/parsed data/processed models/core_smoke outputs/core_smoke
+          echo '{"workflow_revision":"core-model-smoke-v1"}' > outputs/core_smoke/workflow_context.json
+          echo "Core-model smoke test V1"
+          echo "Window: [${{ inputs.start_date }}, ${{ inputs.end_date }})"
+
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Validate inputs
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          HOLDOUT_ROWS: ${{ inputs.holdout_rows }}
+          SPLITS: ${{ inputs.time_series_splits }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import date
+
+          start = date.fromisoformat(os.environ["START_DATE"])
+          end = date.fromisoformat(os.environ["END_DATE"])
+          days = (end - start).days
+          if days <= 0:
+              raise SystemExit("end_date must be later than start_date")
+          if days > 62:
+              raise SystemExit("Smoke test is limited to 62 days")
+          holdout = int(os.environ["HOLDOUT_ROWS"])
+          splits = int(os.environ["SPLITS"])
+          expected = days * 48
+          if holdout <= 48 or holdout >= expected - 200:
+              raise SystemExit(
+                  f"holdout_rows must be greater than 48 and leave at least 200 training rows; expected about {expected} rows"
+              )
+          if splits < 2 or splits > 5:
+              raise SystemExit("time_series_splits must be between 2 and 5")
+          print({"days": days, "expected_standard_rows": expected, "holdout_rows": holdout, "splits": splits})
+          PY
+
+      - name: Collect Elexon core
+        run: >-
+          timeout 15m gb-v2 collect-elexon
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/elexon
+          --chunk-days 7
+
+      - name: Collect NESO embedded forecasts
+        run: >-
+          timeout 10m gb-v2 collect-neso-preset
+          --name "${{ inputs.embedded_preset }}"
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/neso/embedded.parquet
+
+      - name: Collect NESO inertia
+        run: >-
+          timeout 10m gb-v2 collect-neso-preset
+          --name "${{ inputs.inertia_preset }}"
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/neso/inertia.parquet
+
+      - name: Collect demand weather
+        run: >-
+          timeout 8m gb-v2 collect-weather
+          --group demand
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/demand.parquet
+
+      - name: Collect wind weather
+        run: >-
+          timeout 8m gb-v2 collect-weather
+          --group wind
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/wind.parquet
+
+      - name: Collect solar weather
+        run: >-
+          timeout 8m gb-v2 collect-weather
+          --group solar
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/solar.parquet
+
+      - name: Prepare point-in-time and namespaced inputs
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          embedded_path = Path("data/parsed/neso/embedded.parquet")
+          embedded = pd.read_parquet(embedded_path)
+          embedded["timestamp"] = pd.to_datetime(embedded["timestamp"], utc=True)
+          embedded["published_at_utc"] = pd.to_datetime(
+              embedded["published_at_utc"], utc=True, errors="coerce"
+          )
+          local_delivery = embedded["timestamp"].dt.tz_convert("Europe/London")
+          issue_local = (
+              local_delivery.dt.normalize()
+              - pd.Timedelta(days=1)
+              + pd.Timedelta(hours=13)
+          )
+          issue_utc = issue_local.dt.tz_convert("UTC")
+          eligible = embedded.loc[
+              embedded["published_at_utc"].notna()
+              & embedded["published_at_utc"].le(issue_utc)
+          ]
+          selected = (
+              eligible.sort_values(["timestamp", "published_at_utc"])
+              .drop_duplicates("timestamp", keep="last")
+              .sort_values("timestamp")
+          )
+          if selected.empty:
+              raise SystemExit("No point-in-time-safe embedded forecasts were selected")
+          selected.to_parquet(embedded_path, index=False)
+          print({"embedded_raw_rows": len(embedded), "embedded_point_in_time_rows": len(selected)})
+
+          for group in ("demand", "wind", "solar"):
+              path = Path(f"data/parsed/weather/{group}.parquet")
+              frame = pd.read_parquet(path)
+              frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+              frame = frame.sort_values("timestamp").drop_duplicates("timestamp")
+              frame = frame.rename(
+                  columns={
+                      column: f"weather_{group}_{column}"
+                      for column in frame.columns
+                      if column != "timestamp"
+                  }
+              )
+              # Supply one right-hand hourly boundary so the final half-hour can
+              # be interpolated without inventing a zero or dropping the period.
+              tail = frame.tail(1).copy()
+              tail["timestamp"] = tail["timestamp"] + pd.Timedelta(hours=1)
+              frame = pd.concat([frame, tail], ignore_index=True).drop_duplicates(
+                  "timestamp", keep="first"
+              )
+              frame.to_parquet(path, index=False)
+              print({"weather_group": group, "rows_after_boundary": len(frame)})
+          PY
+
+      - name: Build unified core dataset
+        run: >-
+          timeout 20m gb-v2 build-dataset
+          --mapping config/data_mapping_core.yaml
+          --output data/processed/gb_half_hourly_core.parquet
+
+      - name: Validate unified dataset
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import pandas as pd
+
+          path = Path("data/processed/gb_half_hourly_core.parquet")
+          frame = pd.read_parquet(path)
+          required = [
+              "timestamp", "price_gbp_mwh", "demand_mw",
+              "embedded_wind_mw", "embedded_solar_mw",
+              "transmission_wind_mw", "nuclear_mw",
+              "net_import_mw", "inertia_gvas", "model_profile",
+          ]
+          missing_columns = [column for column in required if column not in frame]
+          if missing_columns:
+              raise SystemExit(f"Unified dataset is missing columns: {missing_columns}")
+          gaps = frame[required[1:-1]].isna().sum()
+          gaps = gaps[gaps.gt(0)].to_dict()
+          if gaps:
+              raise SystemExit(f"Required target gaps remain: {gaps}")
+          if set(frame["model_profile"].astype(str)) != {"core_without_battery"}:
+              raise SystemExit("Unexpected model profile")
+          timestamps = pd.to_datetime(frame["timestamp"], utc=True)
+          if timestamps.duplicated().any():
+              raise SystemExit("Duplicate half-hourly timestamps remain")
+          summary = {
+              "rows": int(len(frame)),
+              "columns": int(len(frame.columns)),
+              "timestamp_min": timestamps.min().isoformat(),
+              "timestamp_max": timestamps.max().isoformat(),
+              "model_profile": "core_without_battery",
+              "weather_feature_count": len([c for c in frame if c.startswith("weather_")]),
+              "note": "Software smoke-test dataset; not production training history.",
+          }
+          Path("outputs/core_smoke/dataset_summary.json").write_text(
+              json.dumps(summary, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Train chronological core smoke model
+        run: >-
+          timeout 35m gb-v2 train
+          --input data/processed/gb_half_hourly_core.parquet
+          --models models/core_smoke
+          --holdout-rows "${{ inputs.holdout_rows }}"
+          --time-series-splits "${{ inputs.time_series_splits }}"
+
+      - name: Copy model metrics
+        shell: bash
+        run: |
+          cp models/core_smoke/metadata.json outputs/core_smoke/model_metadata.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          metadata = json.loads(Path("models/core_smoke/metadata.json").read_text())
+          print(json.dumps({
+              "model_profile": metadata.get("model_profile"),
+              "component_targets": metadata.get("component_targets"),
+              "metrics": metadata.get("metrics"),
+              "warning": "Metrics are diagnostic only because this run uses one month of history.",
+          }, indent=2))
+          PY
+
+      - name: Audit output files
+        if: always()
+        continue-on-error: true
+        run: >-
+          python -m gb_platform_v2.data_audit
+          --input data
+          --output outputs/core_smoke/data_audit.json
+
+      - name: Print file inventory
+        if: always()
+        shell: bash
+        run: |
+          find data/processed models/core_smoke outputs/core_smoke -type f -printf '%p %s bytes\n' | sort || true
+
+      - name: Upload core smoke-test artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: core-model-smoke-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            data/processed
+            models/core_smoke
+            outputs/core_smoke
+          if-no-files-found: warn
+          retention-days: 30
