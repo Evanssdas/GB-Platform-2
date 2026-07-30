@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -18,7 +19,8 @@ from .risk import scenario_risk
 from .scenarios import bootstrap_error_scenarios, run_price_monte_carlo
 from .validation import expanding_oof_predictions
 
-COMPONENT_TARGETS = [
+
+FULL_COMPONENT_TARGETS = [
     "demand_mw",
     "embedded_wind_mw",
     "embedded_solar_mw",
@@ -28,7 +30,15 @@ COMPONENT_TARGETS = [
     "battery_net_mw",
     "inertia_gvas",
 ]
-
+CORE_COMPONENT_TARGETS = [
+    "demand_mw",
+    "embedded_wind_mw",
+    "embedded_solar_mw",
+    "transmission_wind_mw",
+    "nuclear_mw",
+    "net_import_mw",
+    "inertia_gvas",
+]
 DERIVED_TARGET_COLUMNS = {
     "total_wind_mw",
     "renewable_mw",
@@ -36,17 +46,39 @@ DERIVED_TARGET_COLUMNS = {
     "residual_after_nuclear_mw",
     "net_system_short_mw",
 }
-
-NON_FEATURE_COLUMNS = {
+BASE_NON_FEATURE_COLUMNS = {
     "timestamp",
     "timestamp_utc",
     "timestamp_local",
+    "delivery_time_utc",
     "delivery_date",
+    "issue_time_utc",
     "price_gbp_mwh",
     "marginal_technology",
-    *COMPONENT_TARGETS,
+    "model_profile",
+    *FULL_COMPONENT_TARGETS,
     *DERIVED_TARGET_COLUMNS,
 }
+
+
+def _component_targets(frame: pd.DataFrame) -> tuple[str, list[str]]:
+    profiles = set(frame.get("model_profile", pd.Series(dtype=str)).dropna().astype(str))
+    if not profiles:
+        targets = [column for column in FULL_COMPONENT_TARGETS if column in frame]
+        profile = "full" if "battery_net_mw" in targets else "core_without_battery"
+    elif profiles == {"full"}:
+        profile = "full"
+        targets = FULL_COMPONENT_TARGETS
+    elif profiles == {"core_without_battery"}:
+        profile = "core_without_battery"
+        targets = CORE_COMPONENT_TARGETS
+    else:
+        raise ValueError(f"Dataset contains inconsistent model profiles: {sorted(profiles)}")
+
+    missing = [column for column in targets if column not in frame]
+    if missing:
+        raise KeyError(f"Dataset is missing profile components: {missing}")
+    return profile, targets
 
 
 def _add_stacked_balance_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -57,11 +89,9 @@ def _add_stacked_balance_features(frame: pd.DataFrame) -> pd.DataFrame:
     out["residual_after_nuclear_mw"] = (
         out["residual_before_nuclear_mw"] - out["nuclear_mw"]
     )
-    out["net_system_short_mw"] = (
-        out["residual_after_nuclear_mw"]
-        - out["net_import_mw"]
-        - out["battery_net_mw"]
-    )
+    out["net_system_short_mw"] = out["residual_after_nuclear_mw"] - out["net_import_mw"]
+    if "battery_net_mw" in out:
+        out["net_system_short_mw"] = out["net_system_short_mw"] - out["battery_net_mw"]
     return out
 
 
@@ -71,16 +101,11 @@ def train_platform(
     holdout_rows: int = 4320,
     time_series_splits: int = 5,
 ) -> dict:
-    """Train component and price models without using realised components in stacking.
-
-    Component models are evaluated chronologically and saved after fitting on all
-    available rows. The price model is trained on expanding-window out-of-fold
-    component predictions, matching the fact that live price forecasts receive
-    predicted rather than realised system components.
-    """
+    """Train component and price models with leakage-safe stacking."""
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
-    features = choose_numeric_features(frame, NON_FEATURE_COLUMNS)
+    profile, component_targets = _component_targets(frame)
+    features = choose_numeric_features(frame, BASE_NON_FEATURE_COLUMNS)
     if not features:
         raise ValueError("No model features found")
 
@@ -88,7 +113,7 @@ def train_platform(
     component_errors = pd.DataFrame(index=frame.index)
     stacked = pd.DataFrame(index=frame.index)
 
-    for target in COMPONENT_TARGETS:
+    for target in component_targets:
         metrics[target] = chronological_holdout_score(
             frame, features, target, holdout_rows, transform="identity"
         )
@@ -100,18 +125,16 @@ def train_platform(
         )
         stacked[target] = oof
         component_errors[target] = frame[target] - oof
+        train_regressor(frame, features, target).save(model_dir / f"{target}.joblib")
 
-        final_model = train_regressor(frame, features, target)
-        final_model.save(model_dir / f"{target}.joblib")
-
-    price_training = frame.drop(columns=list(COMPONENT_TARGETS), errors="ignore").copy()
-    for target in COMPONENT_TARGETS:
+    price_training = frame.drop(columns=component_targets, errors="ignore").copy()
+    for target in component_targets:
         price_training[target] = stacked[target]
     price_training = _add_stacked_balance_features(price_training)
 
     price_features = [
         *features,
-        *COMPONENT_TARGETS,
+        *component_targets,
         "total_wind_mw",
         "renewable_mw",
         "residual_before_nuclear_mw",
@@ -130,14 +153,13 @@ def train_platform(
         transform="arcsinh",
         scale=50.0,
     )
-    price_model = train_regressor(
+    train_regressor(
         price_training,
         price_features,
         "price_gbp_mwh",
         transform="arcsinh",
         scale=50.0,
-    )
-    price_model.save(model_dir / "price_gbp_mwh.joblib")
+    ).save(model_dir / "price_gbp_mwh.joblib")
 
     if "marginal_technology" in price_training.columns:
         marginal_frame = price_training.dropna(subset=[*price_features, "marginal_technology"])
@@ -156,6 +178,8 @@ def train_platform(
     )
     write_json(
         {
+            "model_profile": profile,
+            "component_targets": component_targets,
             "features": features,
             "price_features": price_features,
             "metrics": metrics,
@@ -177,14 +201,15 @@ def forecast_platform(
     model_dir = Path(model_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
+    component_targets = metadata.get("component_targets", FULL_COMPONENT_TARGETS)
 
     point = feature_frame.copy()
-    for target in COMPONENT_TARGETS:
+    for target in component_targets:
         model = TrainedRegressor.load(model_dir / f"{target}.joblib")
         point[target] = model.predict(point)
 
     point = _add_stacked_balance_features(point)
-
     price_model = TrainedRegressor.load(model_dir / "price_gbp_mwh.joblib")
     point["price_point_gbp_mwh"] = price_model.predict(point)
 
@@ -192,7 +217,7 @@ def forecast_platform(
     component_scenarios = bootstrap_error_scenarios(
         point,
         errors,
-        COMPONENT_TARGETS,
+        component_targets,
         scenarios=scenarios,
     )
     result = run_price_monte_carlo(point, component_scenarios, price_model)
@@ -213,6 +238,7 @@ def forecast_platform(
         result.negative_probability,
         result.price_paths,
     )
+    report["model_profile"] = metadata.get("model_profile", "unknown")
     report["risk"] = scenario_risk(
         result.price_paths,
         point["price_point_gbp_mwh"].to_numpy(),
