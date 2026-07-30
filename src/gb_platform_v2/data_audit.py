@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -17,17 +20,59 @@ def _read(path: Path) -> pd.DataFrame:
     raise ValueError(path)
 
 
-def _serialise(value: object) -> object:
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-    if pd.isna(value):
+def _serialise(value: Any) -> Any:
+    """Convert common pandas, NumPy and Python values to JSON-safe values.
+
+    Audit samples may contain ordinary ``datetime.date`` objects after Parquet
+    round-trips, not only ``pandas.Timestamp`` values. Conversion is recursive
+    so list-, array- and mapping-valued cells cannot break the whole report.
+    """
+    if value is None:
         return None
-    if hasattr(value, "item"):
+    if isinstance(value, (pd.Timestamp, datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, pd.Timedelta):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _serialise(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_serialise(item) for item in value]
+
+    # NumPy arrays and similar containers expose tolist(). Do this before
+    # pd.isna(), because pd.isna(container) can return an array of booleans.
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
         try:
-            return value.item()
-        except (ValueError, AttributeError):
+            converted = value.tolist()
+            if converted is not value:
+                return _serialise(converted)
+        except (TypeError, ValueError, AttributeError):
             pass
-    return value
+
+    # NumPy scalar values expose item().
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            converted = value.item()
+            if converted is not value:
+                return _serialise(converted)
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, bool) and missing:
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def audit_frame(path: Path, root: Path) -> dict[str, object]:
@@ -109,7 +154,10 @@ def audit_directory(input_dir: str | Path, output_path: str | Path) -> dict[str,
         "errors": errors,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    output.write_text(
+        json.dumps(_serialise(report), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return report
 
 
