@@ -65,6 +65,63 @@ def _date_chunks(
     return chunks
 
 
+def _settlement_window_utc(start: str, end: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Convert GB settlement-date boundaries to UTC.
+
+    Settlement dates are Europe/London calendar dates. During BST, local
+    midnight is 23:00 UTC on the preceding civil day, so validating against UTC
+    midnight would wrongly reject valid settlement periods.
+    """
+    first, exclusive_end = _validate_window(start, end)
+    start_utc = first.tz_localize("Europe/London").tz_convert("UTC")
+    end_utc = exclusive_end.tz_localize("Europe/London").tz_convert("UTC")
+    return start_utc, end_utc
+
+
+def _trim_timestamp_window(
+    frame: pd.DataFrame,
+    label: str,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    *,
+    spill_tolerance: pd.Timedelta = pd.Timedelta(days=1),
+) -> pd.DataFrame:
+    """Keep ``[start_utc, end_utc)`` rows and tolerate API boundary spill.
+
+    Several Elexon endpoints treat their upper bound as inclusive and may return
+    the first row at the next boundary. A small adjacent spill is trimmed, while
+    rows far from the requested interval still fail loudly.
+    """
+    if "timestamp" not in frame:
+        raise KeyError(f"{label} is missing timestamp")
+    out = frame.copy()
+    timestamps = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    if timestamps.isna().any():
+        raise ValueError(f"{label} contains invalid timestamps")
+    out["timestamp"] = timestamps
+
+    inside = timestamps.between(start_utc, end_utc, inclusive="left")
+    if (~inside).any():
+        outside = timestamps.loc[~inside]
+        too_early = outside < (start_utc - spill_tolerance)
+        too_late = outside >= (end_utc + spill_tolerance)
+        if too_early.any() or too_late.any():
+            raise ValueError(
+                f"{label} contains rows materially outside the requested settlement window: "
+                f"min={outside.min().isoformat()}, max={outside.max().isoformat()}"
+            )
+        print(
+            f"Trimmed {int((~inside).sum())} {label} boundary row(s) outside "
+            f"[{start_utc.isoformat()}, {end_utc.isoformat()})",
+            flush=True,
+        )
+        out = out.loc[inside].copy()
+
+    if out.empty:
+        raise ValueError(f"{label} has no rows inside the requested settlement window")
+    return out.sort_values("timestamp").reset_index(drop=True)
+
+
 def _save_frame(frame: pd.DataFrame, path: str | Path) -> Path:
     if frame.empty:
         raise ValueError(f"Refusing to save an empty parsed dataset to {path}")
@@ -125,27 +182,31 @@ def collect_elexon_core(
         )
 
     output = Path(output_dir)
-    price = _combine(price_frames, "APXMIDP", "timestamp")
-    demand = _combine(demand_frames, "national demand", "timestamp")
-    fuel = _combine(fuel_frames, "fuel generation", "timestamp")
-    interconnectors = _combine(interconnector_frames, "interconnector outturn", "timestamp")
-
-    expected_start = pd.Timestamp(start, tz="UTC")
-    expected_end = pd.Timestamp(end, tz="UTC")
-    for label, frame in {
-        "price": price,
-        "demand": demand,
-        "fuel": fuel,
-        "interconnectors": interconnectors,
-    }.items():
-        timestamps = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
-        if timestamps.isna().any():
-            raise ValueError(f"{label} contains invalid timestamps")
-        outside = ~timestamps.between(expected_start, expected_end, inclusive="left")
-        if outside.any():
-            raise ValueError(
-                f"{label} contains {int(outside.sum())} rows outside the requested [start, end) window"
-            )
+    start_utc, end_utc = _settlement_window_utc(start, end)
+    price = _trim_timestamp_window(
+        _combine(price_frames, "APXMIDP", "timestamp"),
+        "price",
+        start_utc,
+        end_utc,
+    )
+    demand = _trim_timestamp_window(
+        _combine(demand_frames, "national demand", "timestamp"),
+        "demand",
+        start_utc,
+        end_utc,
+    )
+    fuel = _trim_timestamp_window(
+        _combine(fuel_frames, "fuel generation", "timestamp"),
+        "fuel",
+        start_utc,
+        end_utc,
+    )
+    interconnectors = _trim_timestamp_window(
+        _combine(interconnector_frames, "interconnector outturn", "timestamp"),
+        "interconnectors",
+        start_utc,
+        end_utc,
+    )
 
     return {
         "price": _save_frame(price, output / "elexon_mid.parquet"),
@@ -177,7 +238,13 @@ def collect_elexon_units(
             )
         )
     output = Path(output_dir)
-    generation = _combine(frames, "B1610 unit generation", ["timestamp", "bm_unit"])
+    start_utc, end_utc = _settlement_window_utc(start, end)
+    generation = _trim_timestamp_window(
+        _combine(frames, "B1610 unit generation", ["timestamp", "bm_unit"]),
+        "B1610 unit generation",
+        start_utc,
+        end_utc,
+    )
     reference = parse_bm_unit_reference(client.bm_units())
     return {
         "unit_generation": _save_frame(
