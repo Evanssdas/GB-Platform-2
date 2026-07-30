@@ -90,16 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--output", default="outputs/demo")
 
     elexon = sub.add_parser("collect-elexon", help="Collect half-hourly Elexon core data")
-    elexon.add_argument("--start", required=True)
-    elexon.add_argument("--end", required=True)
+    elexon.add_argument("--start", required=True, help="Inclusive YYYY-MM-DD")
+    elexon.add_argument("--end", required=True, help="Exclusive YYYY-MM-DD")
     elexon.add_argument("--output", default="data/parsed/elexon")
     elexon.add_argument("--chunk-days", type=int, default=30)
 
     units = sub.add_parser("collect-elexon-units", help="Collect B1610 and BM-unit metadata")
-    units.add_argument("--start", required=True)
-    units.add_argument("--end", required=True)
+    units.add_argument("--start", required=True, help="Inclusive YYYY-MM-DD")
+    units.add_argument("--end", required=True, help="Exclusive YYYY-MM-DD")
     units.add_argument("--output", default="data/parsed/elexon")
-    units.add_argument("--chunk-days", type=int, default=30)
+    units.add_argument("--chunk-days", type=int, default=7)
 
     actuals = sub.add_parser("collect-actuals", help="Append APXMIDP actual prices")
     actuals.add_argument("--start", required=True)
@@ -107,13 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
     actuals.add_argument("--actuals", default="live/actuals.csv")
     actuals.add_argument("--revision", default="initial")
 
-    neso = sub.add_parser("collect-neso", help="Collect one NESO CKAN resource")
+    neso = sub.add_parser("collect-neso", help="Collect one complete NESO CKAN resource")
     neso.add_argument("--resource-id", required=True)
     neso.add_argument("--output", required=True)
 
-    neso_preset = sub.add_parser("collect-neso-preset", help="Collect a known NESO dataset")
+    neso_preset = sub.add_parser(
+        "collect-neso-preset",
+        help="Collect a known NESO dataset, optionally restricted to [start, end)",
+    )
     neso_preset.add_argument("--name", choices=sorted(NESO_RESOURCES), required=True)
     neso_preset.add_argument("--output", required=True)
+    neso_preset.add_argument("--start", help="Inclusive YYYY-MM-DD")
+    neso_preset.add_argument("--end", help="Exclusive YYYY-MM-DD")
 
     weather = sub.add_parser(
         "collect-weather",
@@ -151,14 +156,7 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command == "train":
         frame = _prepare(_load_frame(args.input))
-        print(
-            train_platform(
-                frame,
-                args.models,
-                args.holdout_rows,
-                args.time_series_splits,
-            )
-        )
+        print(train_platform(frame, args.models, args.holdout_rows, args.time_series_splits))
     elif args.command == "forecast":
         frame = _prepare(_load_frame(args.input))
         print(forecast_platform(frame, args.models, args.output, args.scenarios))
@@ -189,7 +187,7 @@ def main() -> None:
     elif args.command == "collect-neso":
         print(collect_neso_resource(args.resource_id, args.output))
     elif args.command == "collect-neso-preset":
-        print(collect_neso_preset(args.name, args.output))
+        print(collect_neso_preset(args.name, args.output, args.start, args.end))
     elif args.command == "collect-weather":
         settings = _config(args.config)
         print(
