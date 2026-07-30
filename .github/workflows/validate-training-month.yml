@@ -1,10 +1,10 @@
-name: Validate one training month
+name: Validate one training month V2
 
 on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: First delivery date YYYY-MM-DD
+        description: Inclusive first delivery date YYYY-MM-DD
         required: true
         default: "2025-07-01"
       end_date:
@@ -30,7 +30,7 @@ on:
           - inertia_2026_27
         default: inertia_2025_26
       collect_units:
-        description: Include delayed B1610 unit generation
+        description: Include delayed and revision-prone B1610 unit generation
         required: true
         type: boolean
         default: true
@@ -38,9 +38,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: validate-training-month-${{ inputs.start_date }}-${{ inputs.end_date }}
+  cancel-in-progress: false
+
 jobs:
   collect-and-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
       ENTSOE_TOKEN: ${{ secrets.ENTSOE_TOKEN }}
     steps:
@@ -50,8 +55,26 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install
-        run: pip install -e ".[dev]"
+      - name: Confirm V2 revision and validate inputs
+        shell: bash
+        run: |
+          echo "Training-month validator V2"
+          echo "Window: [${{ inputs.start_date }}, ${{ inputs.end_date }})"
+          python - <<'PY'
+          import pandas as pd
+          start = pd.Timestamp("${{ inputs.start_date }}")
+          end = pd.Timestamp("${{ inputs.end_date }}")
+          if end <= start:
+              raise SystemExit("end_date must be later than start_date")
+          if (end - start).days > 62:
+              raise SystemExit("This validation workflow is limited to 62 days")
+          print(f"Requested days: {(end - start).days}")
+          PY
+
+      - name: Install and test
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
 
       - name: Confirm ENTSO-E secret
         shell: bash
@@ -68,7 +91,7 @@ jobs:
           --start "${{ inputs.start_date }}"
           --end "${{ inputs.end_date }}"
           --output data/parsed/elexon
-          --chunk-days 15
+          --chunk-days 14
 
       - name: Collect Elexon unit generation
         if: inputs.collect_units
@@ -77,7 +100,7 @@ jobs:
           --start "${{ inputs.start_date }}"
           --end "${{ inputs.end_date }}"
           --output data/parsed/elexon
-          --chunk-days 15
+          --chunk-days 7
 
       - name: Collect NESO embedded forecasts
         run: >-
@@ -132,17 +155,21 @@ jobs:
           --input data/parsed
           --output data/parsed/data_audit.json
 
-      - name: Print file inventory
+      - name: Print safe file inventory
         if: always()
         shell: bash
         run: |
-          find data/parsed -type f -printf '%p %s bytes\n' | sort
+          if [ -d data/parsed ]; then
+            find data/parsed -type f -printf '%p %s bytes\n' | sort
+          else
+            echo "No parsed-data directory exists"
+          fi
 
       - name: Upload validation data
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: training-month-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: training-month-v2-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: data/parsed
           if-no-files-found: error
           retention-days: 30
