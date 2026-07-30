@@ -58,7 +58,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: entsoe-${{ inputs.start_utc }}-${{ inputs.end_utc }}
+          name: entsoe-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: data/parsed/entsoe
           if-no-files-found: warn
           retention-days: 30
