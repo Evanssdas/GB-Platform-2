@@ -1,0 +1,3 @@
+bm_unit,technology,sign,notes
+REPLACE_WITH_BM_UNIT,battery,1,Positive B1610 generation means discharge to grid
+REPLACE_WITH_PUMPED_STORAGE_UNIT,pumped_storage,1,Review unit identity before use

@@ -1,0 +1,39 @@
+# Copy to config/jao_publications.yaml after confirming each product in JAO.
+# Do not reuse one schema across products without checking the returned fields.
+
+publications:
+  ifa_day_ahead_capacity:
+    enabled: false
+    path: REQUIRED_JAO_PUBLICATION_PATH
+    params:
+      border: GB-FR
+      horizon: day-ahead
+    records_path: REQUIRED_RECORD_LIST_KEY
+    timestamp_column: REQUIRED_TIMESTAMP_COLUMN
+    value_columns:
+      import_capacity_mw: REQUIRED_IMPORT_COLUMN
+      export_capacity_mw: REQUIRED_EXPORT_COLUMN
+
+  nemo_day_ahead_capacity:
+    enabled: false
+    path: REQUIRED_JAO_PUBLICATION_PATH
+    params:
+      border: GB-BE
+      horizon: day-ahead
+    records_path: REQUIRED_RECORD_LIST_KEY
+    timestamp_column: REQUIRED_TIMESTAMP_COLUMN
+    value_columns:
+      import_capacity_mw: REQUIRED_IMPORT_COLUMN
+      export_capacity_mw: REQUIRED_EXPORT_COLUMN
+
+  viking_day_ahead_capacity:
+    enabled: false
+    path: REQUIRED_JAO_PUBLICATION_PATH
+    params:
+      border: GB-DK
+      horizon: day-ahead
+    records_path: REQUIRED_RECORD_LIST_KEY
+    timestamp_column: REQUIRED_TIMESTAMP_COLUMN
+    value_columns:
+      import_capacity_mw: REQUIRED_IMPORT_COLUMN
+      export_capacity_mw: REQUIRED_EXPORT_COLUMN
