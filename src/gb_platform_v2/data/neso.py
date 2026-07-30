@@ -14,6 +14,7 @@ NESO_RESOURCES = {
     "inertia_2026_27": "3ff8b466-5c16-4713-abfe-ad332298f15f",
     "inertia_2025_26": "936daa4f-fca4-4c6a-968a-884f3d77bafe",
     "inertia_2024_25": "7a12d0bd-448d-42a9-b333-4a32761dbad4",
+    "inertia_2023_24": "5bd6ec4d-a2df-4c94-9b27-fdf8cf04d7dd",
     "historic_demand_2025": "b2bde559-3455-4021-b179-dfe60c0337b0",
     "inertia_cost": "6295f4ed-b43d-4a80-8ca9-c27c9fa16517",
 }
