@@ -1,0 +1,148 @@
+name: Validate one training month
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: First delivery date YYYY-MM-DD
+        required: true
+        default: "2025-07-01"
+      end_date:
+        description: Exclusive end date YYYY-MM-DD
+        required: true
+        default: "2025-08-01"
+      embedded_preset:
+        description: Matching NESO embedded forecast resource
+        required: true
+        type: choice
+        options:
+          - embedded_2024
+          - embedded_2025
+          - embedded_2026_h1
+        default: embedded_2025
+      inertia_preset:
+        description: Matching NESO inertia resource
+        required: true
+        type: choice
+        options:
+          - inertia_2024_25
+          - inertia_2025_26
+          - inertia_2026_27
+        default: inertia_2025_26
+      collect_units:
+        description: Include delayed B1610 unit generation
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  collect-and-audit:
+    runs-on: ubuntu-latest
+    env:
+      ENTSOE_TOKEN: ${{ secrets.ENTSOE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Confirm ENTSO-E secret
+        shell: bash
+        run: |
+          if [ -z "$ENTSOE_TOKEN" ]; then
+            echo "ENTSOE_TOKEN repository secret is missing"
+            exit 1
+          fi
+          echo "ENTSOE_TOKEN is configured"
+
+      - name: Collect Elexon core
+        run: >-
+          gb-v2 collect-elexon
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/elexon
+          --chunk-days 15
+
+      - name: Collect Elexon unit generation
+        if: inputs.collect_units
+        run: >-
+          gb-v2 collect-elexon-units
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/elexon
+          --chunk-days 15
+
+      - name: Collect NESO embedded forecasts
+        run: >-
+          gb-v2 collect-neso-preset
+          --name "${{ inputs.embedded_preset }}"
+          --output data/parsed/neso/embedded.parquet
+
+      - name: Collect NESO inertia
+        run: >-
+          gb-v2 collect-neso-preset
+          --name "${{ inputs.inertia_preset }}"
+          --output data/parsed/neso/inertia.parquet
+
+      - name: Collect demand weather
+        run: >-
+          gb-v2 collect-weather
+          --group demand
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/demand.parquet
+
+      - name: Collect wind weather
+        run: >-
+          gb-v2 collect-weather
+          --group wind
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/wind.parquet
+
+      - name: Collect solar weather
+        run: >-
+          gb-v2 collect-weather
+          --group solar
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/solar.parquet
+
+      - name: Collect ENTSO-E neighbours
+        id: entsoe
+        continue-on-error: true
+        run: >-
+          python -m gb_platform_v2.entsoe_cli
+          --config config/entsoe.yaml
+          --start "${{ inputs.start_date }}T00:00Z"
+          --end "${{ inputs.end_date }}T00:00Z"
+          --output data/parsed/entsoe
+
+      - name: Audit collected files
+        if: always()
+        run: >-
+          python -m gb_platform_v2.data_audit
+          --input data/parsed
+          --output data/parsed/data_audit.json
+
+      - name: Print file inventory
+        if: always()
+        shell: bash
+        run: |
+          find data/parsed -type f -printf '%p %s bytes\n' | sort
+
+      - name: Upload validation data
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: training-month-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: data/parsed
+          if-no-files-found: error
+          retention-days: 30
