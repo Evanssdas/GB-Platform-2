@@ -99,11 +99,7 @@ def collect_elexon_core(
     output_dir: str | Path,
     chunk_days: int = 30,
 ) -> dict[str, Path]:
-    """Collect APXMIDP, demand, fuel generation and interconnector outturn.
-
-    Parameters use ``[start, end)`` delivery-date semantics. For example,
-    ``2025-07-01`` to ``2025-08-01`` collects July 2025 only.
-    """
+    """Collect APXMIDP, demand, fuel generation and interconnector outturn."""
     client = ElexonClient()
     price_frames: list[pd.DataFrame] = []
     demand_frames: list[pd.DataFrame] = []
@@ -115,9 +111,7 @@ def collect_elexon_core(
         exclusive_end = chunk_exclusive_end.strftime("%Y-%m-%d")
         inclusive_end = (chunk_exclusive_end - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-        price_frames.append(
-            parse_elexon_mid(client.market_index(settlement_start, exclusive_end))
-        )
+        price_frames.append(parse_elexon_mid(client.market_index(settlement_start, exclusive_end)))
         demand_frames.append(
             parse_elexon_demand(client.national_demand(settlement_start, inclusive_end))
         )
@@ -204,17 +198,43 @@ def collect_neso_resource(
     return _save_frame(frame, output)
 
 
-def collect_neso_preset(name: str, output: str | Path) -> Path:
-    """Collect and parse a known NESO resource by stable project name."""
+def _parse_neso_preset(name: str, records: list[dict]) -> pd.DataFrame:
+    if name.startswith("embedded_"):
+        return parse_embedded_forecasts(records)
+    if name.startswith("inertia_") and name != "inertia_cost":
+        return parse_inertia(records)
+    return parse_neso_records(records)
+
+
+def collect_neso_preset(
+    name: str,
+    output: str | Path,
+    start: str | None = None,
+    end: str | None = None,
+) -> Path:
+    """Collect and parse a known NESO resource.
+
+    When ``start`` and ``end`` are supplied, only the requested delivery-date
+    window is fetched through bounded CKAN SQL pagination.
+    """
     if name not in NESO_RESOURCES:
         raise KeyError(f"Unknown NESO preset {name}; choose from {sorted(NESO_RESOURCES)}")
-    records = NesoCkanClient().all_records(NESO_RESOURCES[name])
-    if name.startswith("embedded_"):
-        frame = parse_embedded_forecasts(records)
-    elif name.startswith("inertia_") and name != "inertia_cost":
-        frame = parse_inertia(records)
+    client = NesoCkanClient()
+    resource_id = NESO_RESOURCES[name]
+    if (start is None) != (end is None):
+        raise ValueError("NESO preset collection requires both start and end, or neither")
+    if start is not None and end is not None:
+        first, exclusive_end = _validate_window(start, end)
+        records = client.records_for_date_window(
+            resource_id,
+            first.strftime("%Y-%m-%d"),
+            exclusive_end.strftime("%Y-%m-%d"),
+        )
     else:
-        frame = parse_neso_records(records)
+        records = client.all_records(resource_id)
+    if not records:
+        raise ValueError(f"NESO returned no records for preset {name}")
+    frame = _parse_neso_preset(name, records)
     return _save_frame(frame, output)
 
 
