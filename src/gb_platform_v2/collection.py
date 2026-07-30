@@ -65,17 +65,25 @@ def _date_chunks(
     return chunks
 
 
+def _settlement_boundary_utc(day: pd.Timestamp) -> pd.Timestamp:
+    """Convert a naive GB settlement-date midnight to UTC."""
+    return day.tz_localize("Europe/London").tz_convert("UTC")
+
+
 def _settlement_window_utc(start: str, end: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Convert GB settlement-date boundaries to UTC.
 
     Settlement dates are Europe/London calendar dates. During BST, local
-    midnight is 23:00 UTC on the preceding civil day, so validating against UTC
-    midnight would wrongly reject valid settlement periods.
+    midnight is 23:00 UTC on the preceding civil day, so validating or querying
+    against UTC midnight would lose the first two half-hours of each summer
+    settlement month.
     """
     first, exclusive_end = _validate_window(start, end)
-    start_utc = first.tz_localize("Europe/London").tz_convert("UTC")
-    end_utc = exclusive_end.tz_localize("Europe/London").tz_convert("UTC")
-    return start_utc, end_utc
+    return _settlement_boundary_utc(first), _settlement_boundary_utc(exclusive_end)
+
+
+def _rfc3339_utc(value: pd.Timestamp) -> str:
+    return value.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _trim_timestamp_window(
@@ -88,9 +96,9 @@ def _trim_timestamp_window(
 ) -> pd.DataFrame:
     """Keep ``[start_utc, end_utc)`` rows and tolerate API boundary spill.
 
-    Several Elexon endpoints treat their upper bound as inclusive and may return
-    the first row at the next boundary. A small adjacent spill is trimmed, while
-    rows far from the requested interval still fail loudly.
+    Several source endpoints treat their upper bound as inclusive and may
+    return the first row at the next boundary. A small adjacent spill is
+    trimmed, while rows far from the requested interval still fail loudly.
     """
     if "timestamp" not in frame:
         raise KeyError(f"{label} is missing timestamp")
@@ -165,10 +173,18 @@ def collect_elexon_core(
 
     for chunk_start, chunk_exclusive_end in _date_chunks(start, end, chunk_days):
         settlement_start = chunk_start.strftime("%Y-%m-%d")
-        exclusive_end = chunk_exclusive_end.strftime("%Y-%m-%d")
         inclusive_end = (chunk_exclusive_end - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        chunk_start_utc = _settlement_boundary_utc(chunk_start)
+        chunk_end_utc = _settlement_boundary_utc(chunk_exclusive_end)
 
-        price_frames.append(parse_elexon_mid(client.market_index(settlement_start, exclusive_end)))
+        price_frames.append(
+            parse_elexon_mid(
+                client.market_index(
+                    _rfc3339_utc(chunk_start_utc),
+                    _rfc3339_utc(chunk_end_utc),
+                )
+            )
+        )
         demand_frames.append(
             parse_elexon_demand(client.national_demand(settlement_start, inclusive_end))
         )
@@ -232,8 +248,8 @@ def collect_elexon_units(
         frames.append(
             parse_unit_generation(
                 client.actual_generation_per_unit(
-                    chunk_start.strftime("%Y-%m-%d"),
-                    chunk_exclusive_end.strftime("%Y-%m-%d"),
+                    _rfc3339_utc(_settlement_boundary_utc(chunk_start)),
+                    _rfc3339_utc(_settlement_boundary_utc(chunk_exclusive_end)),
                 )
             )
         )
@@ -312,10 +328,12 @@ def collect_previous_run_weather(
     end: str,
     output: str | Path,
 ) -> Path:
-    """Collect weather for ``[start, end)`` while adapting to inclusive API dates."""
-    first, exclusive_end = _validate_window(start, end)
-    api_end_inclusive = (exclusive_end - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    api_start = first.strftime("%Y-%m-%d")
+    """Collect UTC weather covering a GB settlement-date ``[start, end)`` window."""
+    start_utc, end_utc = _settlement_window_utc(start, end)
+    api_start = start_utc.floor("D").strftime("%Y-%m-%d")
+    api_end_inclusive = (end_utc - pd.Timedelta(nanoseconds=1)).floor("D").strftime(
+        "%Y-%m-%d"
+    )
 
     client = OpenMeteoClient()
     site_frames: list[pd.DataFrame] = []
@@ -335,14 +353,13 @@ def collect_previous_run_weather(
     merged = site_frames[0]
     for frame in site_frames[1:]:
         merged = merged.merge(frame, on="timestamp", how="outer", validate="one_to_one")
-    timestamps = pd.to_datetime(merged["timestamp"], utc=True, errors="coerce")
-    mask = timestamps.between(
-        pd.Timestamp(first, tz="UTC"),
-        pd.Timestamp(exclusive_end, tz="UTC"),
-        inclusive="left",
+    merged = _trim_timestamp_window(
+        merged,
+        "weather",
+        start_utc,
+        end_utc,
     )
-    merged = merged.loc[mask].sort_values("timestamp").drop_duplicates("timestamp")
-    return _save_frame(merged, output)
+    return _save_frame(merged.drop_duplicates("timestamp"), output)
 
 
 def save_raw_payload(payload: object, path: str | Path) -> Path:
