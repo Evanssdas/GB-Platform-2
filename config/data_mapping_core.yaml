@@ -1,0 +1,42 @@
+# Real-data mapping validated against the July 2025 V4 collection artifact.
+# This is an explicit core profile: battery output is not substituted with zero.
+
+required_components:
+  - demand_mw
+  - embedded_wind_mw
+  - embedded_solar_mw
+  - transmission_wind_mw
+  - nuclear_mw
+  - net_import_mw
+  - inertia_gvas
+
+paths:
+  elexon_price: data/parsed/elexon/elexon_mid.parquet
+  elexon_demand: data/parsed/elexon/elexon_demand.parquet
+  elexon_fuel: data/parsed/elexon/elexon_fuelhh.parquet
+  elexon_interconnectors: data/parsed/elexon/elexon_interconnectors.parquet
+  neso_embedded: data/parsed/neso/embedded.parquet
+  neso_inertia: data/parsed/neso/inertia.parquet
+  weather_demand: data/parsed/weather/demand.parquet
+  weather_wind: data/parsed/weather/wind.parquet
+  weather_solar: data/parsed/weather/solar.parquet
+
+columns:
+  price_gbp_mwh: price_gbp_mwh
+  demand_mw: demand_mw
+  transmission_wind_mw: fuel_wind_mw
+  nuclear_mw: fuel_nuclear_mw
+  embedded_timestamp: timestamp
+  embedded_published_at: published_at_utc
+  embedded_wind_mw: embedded_wind_mw
+  embedded_solar_mw: embedded_solar_mw
+  inertia_timestamp: timestamp
+  inertia_gvas: outturn_inertia_gvas
+
+optional_columns:
+  net_import_mw: net_import_mw
+
+issue_time:
+  # Day-ahead forecast issue time in local GB time.
+  local_hour: 13
+  local_minute: 0
