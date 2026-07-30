@@ -1,73 +1,160 @@
-name: Collect ENTSO-E neighbours V2
-run-name: ENTSO-E V2 ${{ inputs.start_utc }} to ${{ inputs.end_utc }}
+name: Collect ENTSO-E neighbours V3
+run-name: ENTSO-E ${{ inputs.start_utc }} to ${{ inputs.end_utc }}
 
 on:
   workflow_dispatch:
     inputs:
       start_utc:
-        description: UTC start, e.g. 2026-07-01T00:00Z
+        description: Inclusive UTC start, e.g. 2026-07-01T00:00Z
         required: true
         default: "2026-07-01T00:00Z"
       end_utc:
-        description: UTC exclusive end
+        description: Exclusive UTC end
         required: true
         default: "2026-07-02T00:00Z"
 
 permissions:
   contents: read
 
+concurrency:
+  group: entsoe-${{ inputs.start_utc }}-${{ inputs.end_utc }}
+  cancel-in-progress: false
+
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       ENTSOE_TOKEN: ${{ secrets.ENTSOE_TOKEN }}
     steps:
       - uses: actions/checkout@v6
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
-      - name: Confirm V2 workflow revision
-        run: echo "Running ENTSO-E collector workflow V2 with safe artifact naming"
+
+      - name: Bootstrap diagnostics and validate inputs
+        id: validate
+        continue-on-error: true
+        shell: bash
+        env:
+          START_UTC: ${{ inputs.start_utc }}
+          END_UTC: ${{ inputs.end_utc }}
+        run: |
+          mkdir -p data/parsed/entsoe
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime
+          from pathlib import Path
+
+          def parse(value: str) -> datetime:
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          start = parse(os.environ["START_UTC"])
+          end = parse(os.environ["END_UTC"])
+          if start.tzinfo is None or end.tzinfo is None:
+              raise SystemExit("start_utc and end_utc must include a UTC offset or Z")
+          if end <= start:
+              raise SystemExit("end_utc must be later than start_utc")
+          if (end - start).days > 62:
+              raise SystemExit("Standalone ENTSO-E runs are limited to 62 days")
+          payload = {
+              "workflow_revision": "entsoe-v3",
+              "run_id": os.environ.get("GITHUB_RUN_ID"),
+              "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "commit_sha": os.environ.get("GITHUB_SHA"),
+              "start_utc_inclusive": start.isoformat(),
+              "end_utc_exclusive": end.isoformat(),
+          }
+          Path("data/parsed/entsoe/workflow_context.json").write_text(
+              json.dumps(payload, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(payload, indent=2))
+          PY
+
       - name: Check secret is configured
+        id: secret
+        if: steps.validate.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
-          if [ -z "$ENTSOE_TOKEN" ]; then
-            echo "ENTSOE_TOKEN repository secret is missing"
-            exit 1
-          fi
+          test -n "$ENTSOE_TOKEN"
           echo "ENTSOE_TOKEN is configured"
-      - name: Install
-        run: pip install -e ".[dev]"
+
+      - name: Install and test
+        id: install_test
+        if: steps.validate.outcome == 'success' && steps.secret.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q tests/test_entsoe.py
+
       - name: Collect ENTSO-E products
         id: collect_entsoe
+        if: steps.install_test.outcome == 'success'
         continue-on-error: true
         run: >-
-          python -m gb_platform_v2.entsoe_cli
+          timeout 30m python -m gb_platform_v2.entsoe_cli
           --config config/entsoe.yaml
           --start "${{ inputs.start_utc }}"
           --end "${{ inputs.end_utc }}"
           --output data/parsed/entsoe
+
+      - name: Write workflow status
+        if: always()
+        shell: bash
+        env:
+          VALIDATE: ${{ steps.validate.outcome }}
+          SECRET: ${{ steps.secret.outcome }}
+          INSTALL_TEST: ${{ steps.install_test.outcome }}
+          COLLECT_ENTSOE: ${{ steps.collect_entsoe.outcome }}
+        run: |
+          mkdir -p data/parsed/entsoe
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          status = {
+              "validate": os.environ.get("VALIDATE", "not_run"),
+              "secret": os.environ.get("SECRET", "not_run"),
+              "install_test": os.environ.get("INSTALL_TEST", "not_run"),
+              "collect_entsoe": os.environ.get("COLLECT_ENTSOE", "not_run"),
+          }
+          Path("data/parsed/entsoe/workflow_status.json").write_text(
+              json.dumps(status, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(status, indent=2))
+          PY
+
       - name: Summarise without exposing credentials
         if: always()
         shell: bash
-        run: |
-          if [ -d data/parsed/entsoe ]; then
-            find data/parsed/entsoe -maxdepth 1 -type f -printf '%f %s bytes\n'
-          else
-            echo "No ENTSO-E output directory was created"
-          fi
-      - name: Upload ENTSO-E data and status
+        run: find data/parsed/entsoe -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+
+      - name: Upload ENTSO-E data and diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: entsoe-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: entsoe-v3-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: data/parsed/entsoe
           if-no-files-found: warn
           retention-days: 30
-      - name: Fail job when no usable ENTSO-E data were collected
-        if: steps.collect_entsoe.outcome == 'failure'
+
+      - name: Enforce required results
+        if: always()
         shell: bash
+        env:
+          VALIDATE: ${{ steps.validate.outcome }}
+          SECRET: ${{ steps.secret.outcome }}
+          INSTALL_TEST: ${{ steps.install_test.outcome }}
+          COLLECT_ENTSOE: ${{ steps.collect_entsoe.outcome }}
         run: |
-          echo "ENTSO-E collection produced no usable datasets. Download collection_status.json from the artifact for safe diagnostics."
-          exit 1
+          failed=0
+          for name in VALIDATE SECRET INSTALL_TEST COLLECT_ENTSOE; do
+            [ "${!name}" = "success" ] || { echo "Required step $name: ${!name}"; failed=1; }
+          done
+          exit "$failed"
