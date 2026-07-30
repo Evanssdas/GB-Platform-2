@@ -38,16 +38,24 @@ The core profile deliberately excludes battery output until the B1610 storage
 classification is complete. It does not substitute unavailable battery data with
 zero.
 
-## 4. Collect historical data V3
+## 4. Collect historical data V4
 
 **Use:** collect longer training history after the one-month validator and smoke
 test have passed.
 
-Each run is limited to 366 days and uses bounded source queries and hard source
-timeouts. For multi-year history, run one archive/preset-compatible period at a
-time and combine the audited artifacts. Elexon, NESO and weather are critical;
-ENTSO-E and B1610 are advisory unless explicitly required by a later full-model
-workflow.
+Each run is limited to 366 days and uses bounded source queries, monthly NESO
+chunks and hard source timeouts. The workflow validates that the selected embedded
+and inertia archives cover the requested period before collection begins. Elexon,
+NESO, weather and the final audit are critical; ENTSO-E and B1610 are advisory
+unless explicitly required by a later full-model workflow.
+
+For the latest complete twelve-month core-training period, use two archive-compatible
+runs:
+
+1. `2025-04-01` to `2026-01-01`, with `embedded_2025` and `inertia_2025_26`.
+2. `2026-01-01` to `2026-04-01`, with `embedded_2026_h1` and `inertia_2025_26`.
+
+These artifacts must be audited and combined before production-candidate training.
 
 ## 5. Collect ENTSO-E neighbours V3
 
