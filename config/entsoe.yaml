@@ -1,0 +1,36 @@
+# ENTSO-E bidding-zone EIC codes used by the GB platform.
+# Keep Ireland/Northern Ireland disabled until the exact SEM-area product and
+# direction conventions are verified for the required document type.
+
+areas:
+  GB: 10YGB-00000A-0
+  FR: 10YFR-RTE------C
+  BE: 10YBE----------2
+  NL: 10YNL----------L
+  NO2: 10YNO-2--------T
+  DK1: 10YDK-1--------W
+
+borders:
+  france:
+    neighbour: FR
+    enabled: true
+  belgium:
+    neighbour: BE
+    enabled: true
+  netherlands:
+    neighbour: NL
+    enabled: true
+  norway_no2:
+    neighbour: NO2
+    enabled: true
+  denmark_dk1:
+    neighbour: DK1
+    enabled: true
+
+products:
+  neighbouring_day_ahead_prices: true
+  physical_flows: true
+  day_ahead_scheduled_exchanges: true
+
+# Positive net_import_mw always means electricity flowing into GB.
+sign_convention: positive_into_gb
