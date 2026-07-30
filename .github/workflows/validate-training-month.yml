@@ -1,4 +1,4 @@
-name: Validate one training month V2
+name: Validate one training month V3
 
 on:
   workflow_dispatch:
@@ -50,33 +50,83 @@ jobs:
       ENTSOE_TOKEN: ${{ secrets.ENTSOE_TOKEN }}
     steps:
       - uses: actions/checkout@v6
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Confirm V2 revision and validate inputs
+      - name: Bootstrap diagnostics directory
         shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          EMBEDDED_PRESET: ${{ inputs.embedded_preset }}
+          INERTIA_PRESET: ${{ inputs.inertia_preset }}
+          COLLECT_UNITS: ${{ inputs.collect_units }}
         run: |
-          echo "Training-month validator V2"
-          echo "Window: [${{ inputs.start_date }}, ${{ inputs.end_date }})"
+          mkdir -p data/parsed
           python - <<'PY'
-          import pandas as pd
-          start = pd.Timestamp("${{ inputs.start_date }}")
-          end = pd.Timestamp("${{ inputs.end_date }}")
-          if end <= start:
-              raise SystemExit("end_date must be later than start_date")
-          if (end - start).days > 62:
-              raise SystemExit("This validation workflow is limited to 62 days")
-          print(f"Requested days: {(end - start).days}")
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "workflow_revision": "V3",
+              "run_id": os.environ.get("GITHUB_RUN_ID"),
+              "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "commit_sha": os.environ.get("GITHUB_SHA"),
+              "start_date_inclusive": os.environ["START_DATE"],
+              "end_date_exclusive": os.environ["END_DATE"],
+              "embedded_preset": os.environ["EMBEDDED_PRESET"],
+              "inertia_preset": os.environ["INERTIA_PRESET"],
+              "collect_units": os.environ["COLLECT_UNITS"],
+          }
+          Path("data/parsed/workflow_context.json").write_text(
+              json.dumps(payload, indent=2), encoding="utf-8"
+          )
+          print("Training-month validator V3")
+          print(f"Window: [{payload['start_date_inclusive']}, {payload['end_date_exclusive']})")
           PY
 
-      - name: Install and test
+      - name: Validate inputs without third-party packages
+        id: validate_inputs
+        continue-on-error: true
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
         run: |
+          python - <<'PY'
+          import os
+          from datetime import date
+
+          try:
+              start = date.fromisoformat(os.environ["START_DATE"])
+              end = date.fromisoformat(os.environ["END_DATE"])
+          except ValueError as error:
+              raise SystemExit(f"Dates must use YYYY-MM-DD: {error}")
+          if end <= start:
+              raise SystemExit("end_date must be later than start_date")
+          days = (end - start).days
+          if days > 62:
+              raise SystemExit("This validation workflow is limited to 62 days")
+          print(f"Requested days: {days}")
+          PY
+
+      - name: Install and run repository tests
+        id: install_test
+        if: steps.validate_inputs.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pytest -q
 
       - name: Confirm ENTSO-E secret
+        id: entsoe_secret
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           if [ -z "$ENTSOE_TOKEN" ]; then
@@ -86,6 +136,9 @@ jobs:
           echo "ENTSOE_TOKEN is configured"
 
       - name: Collect Elexon core
+        id: elexon_core
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           gb-v2 collect-elexon
           --start "${{ inputs.start_date }}"
@@ -94,7 +147,9 @@ jobs:
           --chunk-days 14
 
       - name: Collect Elexon unit generation
-        if: inputs.collect_units
+        id: elexon_units
+        if: steps.install_test.outcome == 'success' && inputs.collect_units
+        continue-on-error: true
         run: >-
           gb-v2 collect-elexon-units
           --start "${{ inputs.start_date }}"
@@ -103,18 +158,27 @@ jobs:
           --chunk-days 7
 
       - name: Collect NESO embedded forecasts
+        id: neso_embedded
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           gb-v2 collect-neso-preset
           --name "${{ inputs.embedded_preset }}"
           --output data/parsed/neso/embedded.parquet
 
       - name: Collect NESO inertia
+        id: neso_inertia
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           gb-v2 collect-neso-preset
           --name "${{ inputs.inertia_preset }}"
           --output data/parsed/neso/inertia.parquet
 
       - name: Collect demand weather
+        id: weather_demand
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           gb-v2 collect-weather
           --group demand
@@ -123,6 +187,9 @@ jobs:
           --output data/parsed/weather/demand.parquet
 
       - name: Collect wind weather
+        id: weather_wind
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           gb-v2 collect-weather
           --group wind
@@ -131,6 +198,9 @@ jobs:
           --output data/parsed/weather/wind.parquet
 
       - name: Collect solar weather
+        id: weather_solar
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           gb-v2 collect-weather
           --group solar
@@ -140,6 +210,7 @@ jobs:
 
       - name: Collect ENTSO-E neighbours
         id: entsoe
+        if: steps.install_test.outcome == 'success' && steps.entsoe_secret.outcome == 'success'
         continue-on-error: true
         run: >-
           python -m gb_platform_v2.entsoe_cli
@@ -149,27 +220,93 @@ jobs:
           --output data/parsed/entsoe
 
       - name: Audit collected files
-        if: always()
+        id: audit
+        if: always() && steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           python -m gb_platform_v2.data_audit
           --input data/parsed
           --output data/parsed/data_audit.json
 
+      - name: Write workflow status manifest
+        if: always()
+        shell: bash
+        env:
+          INPUT_VALIDATION: ${{ steps.validate_inputs.outcome }}
+          INSTALL_TEST: ${{ steps.install_test.outcome }}
+          ENTSOE_SECRET: ${{ steps.entsoe_secret.outcome }}
+          ELEXON_CORE: ${{ steps.elexon_core.outcome }}
+          ELEXON_UNITS: ${{ steps.elexon_units.outcome }}
+          NESO_EMBEDDED: ${{ steps.neso_embedded.outcome }}
+          NESO_INERTIA: ${{ steps.neso_inertia.outcome }}
+          WEATHER_DEMAND: ${{ steps.weather_demand.outcome }}
+          WEATHER_WIND: ${{ steps.weather_wind.outcome }}
+          WEATHER_SOLAR: ${{ steps.weather_solar.outcome }}
+          ENTSOE: ${{ steps.entsoe.outcome }}
+          AUDIT: ${{ steps.audit.outcome }}
+        run: |
+          mkdir -p data/parsed
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          names = [
+              "INPUT_VALIDATION", "INSTALL_TEST", "ENTSOE_SECRET",
+              "ELEXON_CORE", "ELEXON_UNITS", "NESO_EMBEDDED",
+              "NESO_INERTIA", "WEATHER_DEMAND", "WEATHER_WIND",
+              "WEATHER_SOLAR", "ENTSOE", "AUDIT",
+          ]
+          status = {name.lower(): os.environ.get(name, "not_run") for name in names}
+          Path("data/parsed/workflow_status.json").write_text(
+              json.dumps(status, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(status, indent=2))
+          PY
+
       - name: Print safe file inventory
         if: always()
         shell: bash
-        run: |
-          if [ -d data/parsed ]; then
-            find data/parsed -type f -printf '%p %s bytes\n' | sort
-          else
-            echo "No parsed-data directory exists"
-          fi
+        run: find data/parsed -type f -printf '%p %s bytes\n' | sort
 
-      - name: Upload validation data
+      - name: Upload validation data and diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: training-month-v2-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: training-month-v3-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: data/parsed
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
+
+      - name: Enforce critical validation results
+        if: always()
+        shell: bash
+        env:
+          INPUT_VALIDATION: ${{ steps.validate_inputs.outcome }}
+          INSTALL_TEST: ${{ steps.install_test.outcome }}
+          ELEXON_CORE: ${{ steps.elexon_core.outcome }}
+          ELEXON_UNITS: ${{ steps.elexon_units.outcome }}
+          NESO_EMBEDDED: ${{ steps.neso_embedded.outcome }}
+          NESO_INERTIA: ${{ steps.neso_inertia.outcome }}
+          WEATHER_DEMAND: ${{ steps.weather_demand.outcome }}
+          WEATHER_WIND: ${{ steps.weather_wind.outcome }}
+          WEATHER_SOLAR: ${{ steps.weather_solar.outcome }}
+          COLLECT_UNITS: ${{ inputs.collect_units }}
+          ENTSOE: ${{ steps.entsoe.outcome }}
+        run: |
+          failed=0
+          for name in INPUT_VALIDATION INSTALL_TEST ELEXON_CORE NESO_EMBEDDED NESO_INERTIA WEATHER_DEMAND WEATHER_WIND WEATHER_SOLAR; do
+            outcome="${!name}"
+            if [ "$outcome" != "success" ]; then
+              echo "Critical step $name ended with: $outcome"
+              failed=1
+            fi
+          done
+          if [ "$COLLECT_UNITS" = "true" ] && [ "$ELEXON_UNITS" != "success" ]; then
+            echo "Requested B1610 collection ended with: $ELEXON_UNITS"
+            failed=1
+          fi
+          if [ "$ENTSOE" != "success" ]; then
+            echo "Warning: ENTSO-E ended with $ENTSOE; diagnostics were retained."
+          fi
+          exit "$failed"
