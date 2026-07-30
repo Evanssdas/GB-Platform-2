@@ -10,6 +10,18 @@ import yaml
 from .point_in_time import select_latest_available
 
 
+FULL_COMPONENT_TARGETS = [
+    "demand_mw",
+    "embedded_wind_mw",
+    "embedded_solar_mw",
+    "transmission_wind_mw",
+    "nuclear_mw",
+    "net_import_mw",
+    "battery_net_mw",
+    "inertia_gvas",
+]
+
+
 def _read(path: str | Path) -> pd.DataFrame:
     source = Path(path)
     if not source.exists():
@@ -28,7 +40,7 @@ def _timestamp(frame: pd.DataFrame, column: str = "timestamp") -> pd.DataFrame:
 def _required(mapping: dict, key: str) -> str:
     value = mapping.get(key)
     if not value or str(value).startswith("REQUIRED_"):
-        raise ValueError(f"Set columns.{key} in config/data_mapping.yaml")
+        raise ValueError(f"Set columns.{key} in the data mapping")
     return str(value)
 
 
@@ -53,16 +65,49 @@ def _align_weather(weather: pd.DataFrame, target_timestamps: pd.Series) -> pd.Da
     return aligned.reset_index()
 
 
+def _component_profile(config: dict) -> list[str]:
+    configured = config.get("required_components", FULL_COMPONENT_TARGETS)
+    if not isinstance(configured, list) or not configured:
+        raise ValueError("required_components must be a non-empty list")
+    unknown = sorted(set(configured) - set(FULL_COMPONENT_TARGETS))
+    if unknown:
+        raise ValueError(f"Unknown required components: {unknown}")
+    required = [str(column) for column in configured]
+    minimum = {
+        "demand_mw",
+        "embedded_wind_mw",
+        "embedded_solar_mw",
+        "transmission_wind_mw",
+        "nuclear_mw",
+        "net_import_mw",
+        "inertia_gvas",
+    }
+    missing_minimum = sorted(minimum - set(required))
+    if missing_minimum:
+        raise ValueError(
+            "The supported core profile still requires these components: "
+            f"{missing_minimum}"
+        )
+    return required
+
+
 def build_half_hourly_dataset(
     mapping_path: str | Path,
     output_path: str | Path,
 ) -> pd.DataFrame:
-    """Build a modelling table without silently substituting missing variables."""
+    """Build a modelling table without silently substituting missing variables.
+
+    ``required_components`` in the mapping explicitly selects the modelling
+    profile. The full profile includes battery output. The supported core
+    profile omits battery output and records that omission in the output rather
+    than filling an unavailable measured series with zero.
+    """
     with Path(mapping_path).open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     paths = config["paths"]
     columns = config["columns"]
     optional = config.get("optional_columns", {})
+    required_components = _component_profile(config)
 
     loaded = {name: _read(path) for name, path in paths.items()}
     price = _timestamp(loaded["elexon_price"])
@@ -76,6 +121,7 @@ def build_half_hourly_dataset(
         demand[["timestamp", demand_column]].rename(columns={demand_column: "demand_mw"}),
         on="timestamp",
         how="inner",
+        validate="one_to_one",
     )
 
     fuel_columns = {
@@ -89,6 +135,7 @@ def build_half_hourly_dataset(
         fuel[["timestamp", *fuel_columns]].rename(columns=fuel_columns),
         on="timestamp",
         how="inner",
+        validate="one_to_one",
     )
 
     embedded = loaded["neso_embedded"].copy()
@@ -117,6 +164,8 @@ def build_half_hourly_dataset(
         )
         delivery_times = set(delivery_group["timestamp"])
         selected_embedded.append(eligible.loc[eligible["timestamp"].isin(delivery_times)])
+    if not selected_embedded:
+        raise ValueError("No point-in-time embedded forecasts were eligible")
     embedded_asof = pd.concat(selected_embedded, ignore_index=True).drop_duplicates(
         "timestamp", keep="last"
     )
@@ -132,6 +181,7 @@ def build_half_hourly_dataset(
         embedded_asof[["timestamp", *embedded_columns]].rename(columns=embedded_columns),
         on="timestamp",
         how="left",
+        validate="one_to_one",
     )
 
     inertia = loaded["neso_inertia"].copy()
@@ -140,16 +190,23 @@ def build_half_hourly_dataset(
     inertia_value = _required(columns, "inertia_gvas")
     if inertia_value not in inertia:
         raise KeyError(f"Mapped inertia column is absent: {inertia_value}")
+    inertia = inertia[["timestamp", inertia_value]].drop_duplicates("timestamp", keep="last")
     base = base.merge(
-        inertia[["timestamp", inertia_value]].rename(columns={inertia_value: "inertia_gvas"}),
+        inertia.rename(columns={inertia_value: "inertia_gvas"}),
         on="timestamp",
         how="left",
+        validate="one_to_one",
     )
 
     for weather_path in ("weather_demand", "weather_wind", "weather_solar"):
         weather = _align_weather(loaded[weather_path], base["timestamp"])
         value_columns = [column for column in weather.columns if column != "timestamp"]
-        base = base.merge(weather[["timestamp", *value_columns]], on="timestamp", how="left")
+        base = base.merge(
+            weather[["timestamp", *value_columns]],
+            on="timestamp",
+            how="left",
+            validate="one_to_one",
+        )
 
     for target in (
         "net_import_mw",
@@ -164,31 +221,26 @@ def build_half_hourly_dataset(
             found = None
             for candidate in loaded.values():
                 if source_column in candidate and "timestamp" in candidate:
-                    found = _timestamp(candidate)[["timestamp", source_column]].rename(
-                        columns={source_column: target}
+                    found = (
+                        _timestamp(candidate)[["timestamp", source_column]]
+                        .drop_duplicates("timestamp", keep="last")
+                        .rename(columns={source_column: target})
                     )
                     break
             if found is None:
                 raise KeyError(f"Configured optional column {source_column} was not found")
-            base = base.merge(found, on="timestamp", how="left")
-        elif target in {"net_import_mw", "battery_net_mw"}:
+            base = base.merge(found, on="timestamp", how="left", validate="one_to_one")
+        elif target in required_components:
             raise ValueError(
-                f"{target} is a required model target. Configure its source column before training."
+                f"{target} is required by this modelling profile. Configure its source column."
             )
 
     base = base.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
     base["delivery_time_utc"] = base["timestamp"]
-    required_targets = [
-        "price_gbp_mwh",
-        "demand_mw",
-        "embedded_wind_mw",
-        "embedded_solar_mw",
-        "transmission_wind_mw",
-        "nuclear_mw",
-        "net_import_mw",
-        "battery_net_mw",
-        "inertia_gvas",
-    ]
+    base["model_profile"] = (
+        "full" if "battery_net_mw" in required_components else "core_without_battery"
+    )
+    required_targets = ["price_gbp_mwh", *required_components]
     missing_counts = base[required_targets].isna().sum()
     if missing_counts.any():
         raise ValueError(
