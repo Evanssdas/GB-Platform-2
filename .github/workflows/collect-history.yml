@@ -1,0 +1,180 @@
+name: Collect historical data V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: Inclusive first delivery date YYYY-MM-DD
+        required: true
+        default: "2024-01-01"
+      end_date:
+        description: Exclusive end delivery date YYYY-MM-DD
+        required: true
+        default: "2024-04-01"
+      embedded_preset:
+        description: NESO embedded archive covering the requested dates
+        required: true
+        type: choice
+        options:
+          - embedded_2024
+          - embedded_2025
+          - embedded_2026_h1
+        default: embedded_2024
+      inertia_preset:
+        description: NESO inertia archive covering the requested dates
+        required: true
+        type: choice
+        options:
+          - inertia_2024_25
+          - inertia_2025_26
+          - inertia_2026_27
+        default: inertia_2024_25
+      collect_units:
+        description: Include delayed and revision-prone B1610 unit data
+        required: true
+        type: boolean
+        default: false
+      collect_entsoe:
+        description: Include ENTSO-E neighbours; partial source outages are recorded
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collect-history-${{ inputs.start_date }}-${{ inputs.end_date }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ENTSOE_TOKEN: ${{ secrets.ENTSOE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Confirm workflow revision and inputs
+        shell: bash
+        run: |
+          echo "Historical collector V2"
+          echo "Window: [${{ inputs.start_date }}, ${{ inputs.end_date }})"
+          python - <<'PY'
+          import pandas as pd
+          start = pd.Timestamp("${{ inputs.start_date }}")
+          end = pd.Timestamp("${{ inputs.end_date }}")
+          if end <= start:
+              raise SystemExit("end_date must be later than start_date")
+          print(f"Requested days: {(end - start).days}")
+          PY
+
+      - name: Install and test
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Collect Elexon core
+        run: >-
+          gb-v2 collect-elexon
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/elexon
+          --chunk-days 14
+
+      - name: Collect Elexon unit generation
+        if: inputs.collect_units
+        run: >-
+          gb-v2 collect-elexon-units
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/elexon
+          --chunk-days 7
+
+      - name: Collect NESO embedded forecasts
+        run: >-
+          gb-v2 collect-neso-preset
+          --name "${{ inputs.embedded_preset }}"
+          --output data/parsed/neso/embedded.parquet
+
+      - name: Collect NESO inertia
+        run: >-
+          gb-v2 collect-neso-preset
+          --name "${{ inputs.inertia_preset }}"
+          --output data/parsed/neso/inertia.parquet
+
+      - name: Collect demand weather
+        run: >-
+          gb-v2 collect-weather
+          --group demand
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/demand.parquet
+
+      - name: Collect wind weather
+        run: >-
+          gb-v2 collect-weather
+          --group wind
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/wind.parquet
+
+      - name: Collect solar weather
+        run: >-
+          gb-v2 collect-weather
+          --group solar
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/weather/solar.parquet
+
+      - name: Check ENTSO-E secret
+        if: inputs.collect_entsoe
+        shell: bash
+        run: |
+          if [ -z "$ENTSOE_TOKEN" ]; then
+            echo "ENTSOE_TOKEN repository secret is missing"
+            exit 1
+          fi
+          echo "ENTSOE_TOKEN is configured"
+
+      - name: Collect ENTSO-E neighbours
+        if: inputs.collect_entsoe
+        id: entsoe
+        continue-on-error: true
+        run: >-
+          python -m gb_platform_v2.entsoe_cli
+          --config config/entsoe.yaml
+          --start "${{ inputs.start_date }}T00:00Z"
+          --end "${{ inputs.end_date }}T00:00Z"
+          --output data/parsed/entsoe
+
+      - name: Audit collected files
+        if: always()
+        run: >-
+          python -m gb_platform_v2.data_audit
+          --input data/parsed
+          --output data/parsed/data_audit.json
+
+      - name: Print safe file inventory
+        if: always()
+        shell: bash
+        run: |
+          if [ -d data/parsed ]; then
+            find data/parsed -type f -printf '%p %s bytes\n' | sort
+          else
+            echo "No parsed-data directory exists"
+          fi
+
+      - name: Upload historical data and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: historical-v2-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: data/parsed
+          if-no-files-found: error
+          retention-days: 30
