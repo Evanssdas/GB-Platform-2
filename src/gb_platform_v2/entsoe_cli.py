@@ -1,4 +1,4 @@
-"""Standalone ENTSO-E collector command.
+"""Standalone resilient ENTSO-E collector command.
 
 Usage:
     python -m gb_platform_v2.entsoe_cli --start ... --end ...
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from .entsoe_collection import collect_entsoe_markets
+from .entsoe_resilient import collect_entsoe_markets_resilient
 
 
 def main() -> None:
@@ -18,7 +18,7 @@ def main() -> None:
     parser.add_argument("--end", required=True, help="UTC exclusive end")
     parser.add_argument("--output", default="data/parsed/entsoe")
     args = parser.parse_args()
-    paths = collect_entsoe_markets(args.config, args.start, args.end, args.output)
+    paths = collect_entsoe_markets_resilient(args.config, args.start, args.end, args.output)
     print({name: str(path) for name, path in paths.items()})
 
 
