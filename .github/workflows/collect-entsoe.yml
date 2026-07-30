@@ -1,4 +1,5 @@
-name: Collect ENTSO-E neighbours
+name: Collect ENTSO-E neighbours V2
+run-name: ENTSO-E V2 ${{ inputs.start_utc }} to ${{ inputs.end_utc }}
 
 on:
   workflow_dispatch:
@@ -26,6 +27,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Confirm V2 workflow revision
+        run: echo "Running ENTSO-E collector workflow V2 with safe artifact naming"
       - name: Check secret is configured
         shell: bash
         run: |
