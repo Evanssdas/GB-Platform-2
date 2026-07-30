@@ -1,4 +1,4 @@
-name: Collect historical data V3
+name: Collect historical data V4
 run-name: Historical ${{ inputs.start_date }} to ${{ inputs.end_date }}
 
 on:
@@ -7,23 +7,23 @@ on:
       start_date:
         description: Inclusive first GB settlement date YYYY-MM-DD
         required: true
-        default: "2024-01-01"
+        default: "2025-07-01"
       end_date:
         description: Exclusive final GB settlement date YYYY-MM-DD
         required: true
-        default: "2024-04-01"
+        default: "2025-08-01"
       embedded_preset:
         description: NESO embedded archive covering the requested dates
         required: true
         type: choice
         options: [embedded_2024, embedded_2025, embedded_2026_h1]
-        default: embedded_2024
+        default: embedded_2025
       inertia_preset:
         description: NESO inertia archive covering the requested dates
         required: true
         type: choice
-        options: [inertia_2024_25, inertia_2025_26, inertia_2026_27]
-        default: inertia_2024_25
+        options: [inertia_2023_24, inertia_2024_25, inertia_2025_26, inertia_2026_27]
+        default: inertia_2025_26
       collect_units:
         description: Attempt delayed and revision-prone B1610 unit data
         required: true
@@ -82,18 +82,45 @@ jobs:
           days = (end - start).days
           if days > 366:
               raise SystemExit("One historical run is limited to 366 days")
+
+          embedded_ranges = {
+              "embedded_2024": (date(2024, 1, 1), date(2025, 1, 1)),
+              "embedded_2025": (date(2025, 1, 1), date(2026, 1, 1)),
+              "embedded_2026_h1": (date(2026, 1, 1), date(2026, 7, 1)),
+          }
+          inertia_ranges = {
+              "inertia_2023_24": (date(2023, 4, 1), date(2024, 4, 1)),
+              "inertia_2024_25": (date(2024, 4, 1), date(2025, 4, 1)),
+              "inertia_2025_26": (date(2025, 4, 1), date(2026, 4, 1)),
+              "inertia_2026_27": (date(2026, 4, 1), date(2027, 4, 1)),
+          }
+
+          embedded = os.environ["EMBEDDED_PRESET"]
+          inertia = os.environ["INERTIA_PRESET"]
+          emb_start, emb_end = embedded_ranges[embedded]
+          ine_start, ine_end = inertia_ranges[inertia]
+          if start < emb_start or end > emb_end:
+              raise SystemExit(
+                  f"{embedded} covers [{emb_start}, {emb_end}); requested [{start}, {end})"
+              )
+          if start < ine_start or end > ine_end:
+              raise SystemExit(
+                  f"{inertia} covers [{ine_start}, {ine_end}); requested [{start}, {end})"
+              )
+
           payload = {
-              "workflow_revision": "historical-v3",
+              "workflow_revision": "historical-v4",
               "run_id": os.environ.get("GITHUB_RUN_ID"),
               "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
               "commit_sha": os.environ.get("GITHUB_SHA"),
               "start_date_inclusive": str(start),
               "end_date_exclusive": str(end),
               "requested_days": days,
-              "embedded_preset": os.environ["EMBEDDED_PRESET"],
-              "inertia_preset": os.environ["INERTIA_PRESET"],
+              "embedded_preset": embedded,
+              "inertia_preset": inertia,
               "collect_units": os.environ["COLLECT_UNITS"],
               "collect_entsoe": os.environ["COLLECT_ENTSOE"],
+              "neso_chunk_days": 31,
           }
           Path("data/parsed/workflow_context.json").write_text(
               json.dumps(payload, indent=2), encoding="utf-8"
@@ -132,27 +159,112 @@ jobs:
           --output data/parsed/elexon
           --chunk-days 3
 
-      - name: Collect NESO embedded forecasts for window
+      - name: Collect NESO embedded forecasts in bounded chunks
         id: neso_embedded
         if: steps.install_test.outcome == 'success'
         continue-on-error: true
-        run: >-
-          timeout 30m gb-v2 collect-neso-preset
-          --name "${{ inputs.embedded_preset }}"
-          --start "${{ inputs.start_date }}"
-          --end "${{ inputs.end_date }}"
-          --output data/parsed/neso/embedded.parquet
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          PRESET: ${{ inputs.embedded_preset }}
+        run: |
+          timeout 60m python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          import pandas as pd
 
-      - name: Collect NESO inertia for window
+          start = pd.Timestamp(os.environ["START_DATE"])
+          end = pd.Timestamp(os.environ["END_DATE"])
+          root = Path("data/parsed/neso/embedded_chunks")
+          root.mkdir(parents=True, exist_ok=True)
+          frames = []
+          cursor = start
+          chunk = 0
+          while cursor < end:
+              chunk_end = min(cursor + pd.Timedelta(days=31), end)
+              output = root / f"chunk_{chunk:03d}.parquet"
+              command = [
+                  "gb-v2", "collect-neso-preset",
+                  "--name", os.environ["PRESET"],
+                  "--start", cursor.strftime("%Y-%m-%d"),
+                  "--end", chunk_end.strftime("%Y-%m-%d"),
+                  "--output", str(output),
+              ]
+              print("Running", " ".join(command), flush=True)
+              subprocess.run(command, check=True, timeout=20 * 60)
+              frames.append(pd.read_parquet(output))
+              cursor = chunk_end
+              chunk += 1
+
+          combined = pd.concat(frames, ignore_index=True)
+          combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True)
+          combined["published_at_utc"] = pd.to_datetime(
+              combined["published_at_utc"], utc=True, errors="coerce"
+          )
+          combined = (
+              combined.sort_values(["timestamp", "published_at_utc"])
+              .drop_duplicates(["timestamp", "published_at_utc"], keep="last")
+              .reset_index(drop=True)
+          )
+          output = Path("data/parsed/neso/embedded.parquet")
+          output.parent.mkdir(parents=True, exist_ok=True)
+          combined.to_parquet(output, index=False)
+          print({"chunks": chunk, "rows": len(combined), "output": str(output)})
+          PY
+
+      - name: Collect NESO inertia in bounded chunks
         id: neso_inertia
         if: steps.install_test.outcome == 'success'
         continue-on-error: true
-        run: >-
-          timeout 20m gb-v2 collect-neso-preset
-          --name "${{ inputs.inertia_preset }}"
-          --start "${{ inputs.start_date }}"
-          --end "${{ inputs.end_date }}"
-          --output data/parsed/neso/inertia.parquet
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          PRESET: ${{ inputs.inertia_preset }}
+        run: |
+          timeout 40m python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          import pandas as pd
+
+          start = pd.Timestamp(os.environ["START_DATE"])
+          end = pd.Timestamp(os.environ["END_DATE"])
+          root = Path("data/parsed/neso/inertia_chunks")
+          root.mkdir(parents=True, exist_ok=True)
+          frames = []
+          cursor = start
+          chunk = 0
+          while cursor < end:
+              chunk_end = min(cursor + pd.Timedelta(days=31), end)
+              output = root / f"chunk_{chunk:03d}.parquet"
+              command = [
+                  "gb-v2", "collect-neso-preset",
+                  "--name", os.environ["PRESET"],
+                  "--start", cursor.strftime("%Y-%m-%d"),
+                  "--end", chunk_end.strftime("%Y-%m-%d"),
+                  "--output", str(output),
+              ]
+              print("Running", " ".join(command), flush=True)
+              subprocess.run(command, check=True, timeout=15 * 60)
+              frames.append(pd.read_parquet(output))
+              cursor = chunk_end
+              chunk += 1
+
+          combined = pd.concat(frames, ignore_index=True)
+          combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True)
+          combined = (
+              combined.sort_values("timestamp")
+              .drop_duplicates("timestamp", keep="last")
+              .reset_index(drop=True)
+          )
+          output = Path("data/parsed/neso/inertia.parquet")
+          output.parent.mkdir(parents=True, exist_ok=True)
+          combined.to_parquet(output, index=False)
+          print({"chunks": chunk, "rows": len(combined), "output": str(output)})
+          PY
 
       - name: Collect demand weather
         id: weather_demand
@@ -254,7 +366,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: historical-v3-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: historical-v4-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: data/parsed
           if-no-files-found: warn
           retention-days: 30
@@ -271,11 +383,12 @@ jobs:
           WEATHER_DEMAND: ${{ steps.weather_demand.outcome }}
           WEATHER_WIND: ${{ steps.weather_wind.outcome }}
           WEATHER_SOLAR: ${{ steps.weather_solar.outcome }}
+          AUDIT: ${{ steps.audit.outcome }}
           ELEXON_UNITS: ${{ steps.elexon_units.outcome }}
           ENTSOE: ${{ steps.entsoe.outcome }}
         run: |
           failed=0
-          for name in INPUT_VALIDATION INSTALL_TEST ELEXON_CORE NESO_EMBEDDED NESO_INERTIA WEATHER_DEMAND WEATHER_WIND WEATHER_SOLAR; do
+          for name in INPUT_VALIDATION INSTALL_TEST ELEXON_CORE NESO_EMBEDDED NESO_INERTIA WEATHER_DEMAND WEATHER_WIND WEATHER_SOLAR AUDIT; do
             [ "${!name}" = "success" ] || { echo "Critical step $name: ${!name}"; failed=1; }
           done
           [ "$ELEXON_UNITS" = "success" ] || echo "Advisory: B1610 units ended with $ELEXON_UNITS"
