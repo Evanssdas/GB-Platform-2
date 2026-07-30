@@ -34,6 +34,16 @@ def _response_detail(response: requests.Response) -> str:
         return " ".join(response.text.split())[:800] or "No response body"
 
 
+def _rfc3339_midnight(value: str) -> str:
+    """Return a date/date-time as a UTC RFC3339 value accepted by streams."""
+    text = str(value).strip()
+    if "T" not in text:
+        return f"{text}T00:00Z"
+    if text.endswith("+00:00"):
+        return f"{text[:-6]}Z"
+    return text
+
+
 class ElexonClient:
     """Small source-aware client for Elexon Insights Solution endpoints.
 
@@ -102,7 +112,11 @@ class ElexonClient:
     def market_index(self, start: str, end_exclusive: str) -> Any:
         return self.dataset_stream(
             "MID",
-            {"from": start, "to": end_exclusive, "dataProvider": "APXMIDP"},
+            {
+                "from": _rfc3339_midnight(start),
+                "to": _rfc3339_midnight(end_exclusive),
+                "dataProviders": ["APXMIDP"],
+            },
         )
 
     def fuel_half_hourly(self, start: str, end_inclusive: str) -> Any:
@@ -115,12 +129,7 @@ class ElexonClient:
         )
 
     def national_demand(self, start: str, end_inclusive: str) -> Any:
-        """Retrieve half-hourly INDO/ITSDO outturn by settlement date.
-
-        This deliberately uses the dedicated historical outturn stream. The raw
-        ``datasets/INDO`` route is publication-time oriented and remains
-        available separately for revision-aware ingestion.
-        """
+        """Retrieve half-hourly INDO/ITSDO outturn by settlement date."""
         return self._get(
             "demand/outturn/stream",
             {
@@ -154,28 +163,55 @@ class ElexonClient:
         )
 
     def actual_generation_per_unit(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("B1610", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "B1610",
+            {
+                "from": _rfc3339_midnight(start),
+                "to": _rfc3339_midnight(end_exclusive),
+            },
+        )
 
     def bm_units(self) -> Any:
         return self._get("reference/bmunits/all")
 
     def physical_notifications(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("PN", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "PN",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
 
     def maximum_export_limits(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("MELS", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "MELS",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
 
     def maximum_import_limits(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("MILS", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "MILS",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
 
     def maximum_delivery_bid(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("MDB", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "MDB",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
 
     def maximum_delivery_offer(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("MDO", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "MDO",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
 
     def bid_offer_data(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("BOD", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "BOD",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
 
     def accepted_actions(self, start: str, end_exclusive: str) -> Any:
-        return self.dataset_stream("BOALF", {"from": start, "to": end_exclusive})
+        return self.dataset_stream(
+            "BOALF",
+            {"from": _rfc3339_midnight(start), "to": _rfc3339_midnight(end_exclusive)},
+        )
