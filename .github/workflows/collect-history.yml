@@ -1,41 +1,36 @@
-name: Collect historical data V2
+name: Collect historical data V3
+run-name: Historical ${{ inputs.start_date }} to ${{ inputs.end_date }}
 
 on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: Inclusive first delivery date YYYY-MM-DD
+        description: Inclusive first GB settlement date YYYY-MM-DD
         required: true
         default: "2024-01-01"
       end_date:
-        description: Exclusive end delivery date YYYY-MM-DD
+        description: Exclusive final GB settlement date YYYY-MM-DD
         required: true
         default: "2024-04-01"
       embedded_preset:
         description: NESO embedded archive covering the requested dates
         required: true
         type: choice
-        options:
-          - embedded_2024
-          - embedded_2025
-          - embedded_2026_h1
+        options: [embedded_2024, embedded_2025, embedded_2026_h1]
         default: embedded_2024
       inertia_preset:
         description: NESO inertia archive covering the requested dates
         required: true
         type: choice
-        options:
-          - inertia_2024_25
-          - inertia_2025_26
-          - inertia_2026_27
+        options: [inertia_2024_25, inertia_2025_26, inertia_2026_27]
         default: inertia_2024_25
       collect_units:
-        description: Include delayed and revision-prone B1610 unit data
+        description: Attempt delayed and revision-prone B1610 unit data
         required: true
         type: boolean
         default: false
       collect_entsoe:
-        description: Include ENTSO-E neighbours; partial source outages are recorded
+        description: Attempt ENTSO-E neighbour products when the secret is configured
         required: true
         type: boolean
         default: true
@@ -55,126 +50,234 @@ jobs:
       ENTSOE_TOKEN: ${{ secrets.ENTSOE_TOKEN }}
     steps:
       - uses: actions/checkout@v6
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Confirm workflow revision and inputs
+      - name: Bootstrap diagnostics and validate inputs
+        id: validate_inputs
+        continue-on-error: true
         shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          EMBEDDED_PRESET: ${{ inputs.embedded_preset }}
+          INERTIA_PRESET: ${{ inputs.inertia_preset }}
+          COLLECT_UNITS: ${{ inputs.collect_units }}
+          COLLECT_ENTSOE: ${{ inputs.collect_entsoe }}
         run: |
-          echo "Historical collector V2"
-          echo "Window: [${{ inputs.start_date }}, ${{ inputs.end_date }})"
+          mkdir -p data/parsed
           python - <<'PY'
-          import pandas as pd
-          start = pd.Timestamp("${{ inputs.start_date }}")
-          end = pd.Timestamp("${{ inputs.end_date }}")
+          import json
+          import os
+          from datetime import date
+          from pathlib import Path
+
+          start = date.fromisoformat(os.environ["START_DATE"])
+          end = date.fromisoformat(os.environ["END_DATE"])
           if end <= start:
               raise SystemExit("end_date must be later than start_date")
-          print(f"Requested days: {(end - start).days}")
+          days = (end - start).days
+          if days > 366:
+              raise SystemExit("One historical run is limited to 366 days")
+          payload = {
+              "workflow_revision": "historical-v3",
+              "run_id": os.environ.get("GITHUB_RUN_ID"),
+              "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "commit_sha": os.environ.get("GITHUB_SHA"),
+              "start_date_inclusive": str(start),
+              "end_date_exclusive": str(end),
+              "requested_days": days,
+              "embedded_preset": os.environ["EMBEDDED_PRESET"],
+              "inertia_preset": os.environ["INERTIA_PRESET"],
+              "collect_units": os.environ["COLLECT_UNITS"],
+              "collect_entsoe": os.environ["COLLECT_ENTSOE"],
+          }
+          Path("data/parsed/workflow_context.json").write_text(
+              json.dumps(payload, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(payload, indent=2))
           PY
 
       - name: Install and test
+        id: install_test
+        if: steps.validate_inputs.outcome == 'success'
+        continue-on-error: true
         run: |
+          python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pytest -q
 
       - name: Collect Elexon core
+        id: elexon_core
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
-          gb-v2 collect-elexon
-          --start "${{ inputs.start_date }}"
-          --end "${{ inputs.end_date }}"
-          --output data/parsed/elexon
-          --chunk-days 14
-
-      - name: Collect Elexon unit generation
-        if: inputs.collect_units
-        run: >-
-          gb-v2 collect-elexon-units
+          timeout 60m gb-v2 collect-elexon
           --start "${{ inputs.start_date }}"
           --end "${{ inputs.end_date }}"
           --output data/parsed/elexon
           --chunk-days 7
 
-      - name: Collect NESO embedded forecasts
+      - name: Collect Elexon B1610 units
+        id: elexon_units
+        if: steps.install_test.outcome == 'success' && inputs.collect_units
+        continue-on-error: true
         run: >-
-          gb-v2 collect-neso-preset
+          timeout 60m gb-v2 collect-elexon-units
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --output data/parsed/elexon
+          --chunk-days 3
+
+      - name: Collect NESO embedded forecasts for window
+        id: neso_embedded
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          timeout 30m gb-v2 collect-neso-preset
           --name "${{ inputs.embedded_preset }}"
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
           --output data/parsed/neso/embedded.parquet
 
-      - name: Collect NESO inertia
+      - name: Collect NESO inertia for window
+        id: neso_inertia
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
-          gb-v2 collect-neso-preset
+          timeout 20m gb-v2 collect-neso-preset
           --name "${{ inputs.inertia_preset }}"
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
           --output data/parsed/neso/inertia.parquet
 
       - name: Collect demand weather
+        id: weather_demand
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
-          gb-v2 collect-weather
-          --group demand
-          --start "${{ inputs.start_date }}"
-          --end "${{ inputs.end_date }}"
+          timeout 30m gb-v2 collect-weather --group demand
+          --start "${{ inputs.start_date }}" --end "${{ inputs.end_date }}"
           --output data/parsed/weather/demand.parquet
 
       - name: Collect wind weather
+        id: weather_wind
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
-          gb-v2 collect-weather
-          --group wind
-          --start "${{ inputs.start_date }}"
-          --end "${{ inputs.end_date }}"
+          timeout 30m gb-v2 collect-weather --group wind
+          --start "${{ inputs.start_date }}" --end "${{ inputs.end_date }}"
           --output data/parsed/weather/wind.parquet
 
       - name: Collect solar weather
+        id: weather_solar
+        if: steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
-          gb-v2 collect-weather
-          --group solar
-          --start "${{ inputs.start_date }}"
-          --end "${{ inputs.end_date }}"
+          timeout 30m gb-v2 collect-weather --group solar
+          --start "${{ inputs.start_date }}" --end "${{ inputs.end_date }}"
           --output data/parsed/weather/solar.parquet
 
       - name: Check ENTSO-E secret
-        if: inputs.collect_entsoe
+        id: entsoe_secret
+        if: steps.install_test.outcome == 'success' && inputs.collect_entsoe
+        continue-on-error: true
         shell: bash
         run: |
-          if [ -z "$ENTSOE_TOKEN" ]; then
-            echo "ENTSOE_TOKEN repository secret is missing"
-            exit 1
-          fi
+          test -n "$ENTSOE_TOKEN"
           echo "ENTSOE_TOKEN is configured"
 
       - name: Collect ENTSO-E neighbours
-        if: inputs.collect_entsoe
         id: entsoe
+        if: steps.install_test.outcome == 'success' && inputs.collect_entsoe && steps.entsoe_secret.outcome == 'success'
         continue-on-error: true
         run: >-
-          python -m gb_platform_v2.entsoe_cli
+          timeout 30m python -m gb_platform_v2.entsoe_cli
           --config config/entsoe.yaml
           --start "${{ inputs.start_date }}T00:00Z"
           --end "${{ inputs.end_date }}T00:00Z"
           --output data/parsed/entsoe
 
       - name: Audit collected files
-        if: always()
+        id: audit
+        if: always() && steps.install_test.outcome == 'success'
+        continue-on-error: true
         run: >-
           python -m gb_platform_v2.data_audit
           --input data/parsed
           --output data/parsed/data_audit.json
 
+      - name: Write workflow status
+        if: always()
+        shell: bash
+        env:
+          INPUT_VALIDATION: ${{ steps.validate_inputs.outcome }}
+          INSTALL_TEST: ${{ steps.install_test.outcome }}
+          ELEXON_CORE: ${{ steps.elexon_core.outcome }}
+          ELEXON_UNITS: ${{ steps.elexon_units.outcome }}
+          NESO_EMBEDDED: ${{ steps.neso_embedded.outcome }}
+          NESO_INERTIA: ${{ steps.neso_inertia.outcome }}
+          WEATHER_DEMAND: ${{ steps.weather_demand.outcome }}
+          WEATHER_WIND: ${{ steps.weather_wind.outcome }}
+          WEATHER_SOLAR: ${{ steps.weather_solar.outcome }}
+          ENTSOE_SECRET: ${{ steps.entsoe_secret.outcome }}
+          ENTSOE: ${{ steps.entsoe.outcome }}
+          AUDIT: ${{ steps.audit.outcome }}
+        run: |
+          mkdir -p data/parsed
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          keys = [
+              "INPUT_VALIDATION", "INSTALL_TEST", "ELEXON_CORE", "ELEXON_UNITS",
+              "NESO_EMBEDDED", "NESO_INERTIA", "WEATHER_DEMAND", "WEATHER_WIND",
+              "WEATHER_SOLAR", "ENTSOE_SECRET", "ENTSOE", "AUDIT",
+          ]
+          status = {key.lower(): os.environ.get(key, "not_run") for key in keys}
+          Path("data/parsed/workflow_status.json").write_text(
+              json.dumps(status, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(status, indent=2))
+          PY
+
       - name: Print safe file inventory
         if: always()
         shell: bash
-        run: |
-          if [ -d data/parsed ]; then
-            find data/parsed -type f -printf '%p %s bytes\n' | sort
-          else
-            echo "No parsed-data directory exists"
-          fi
+        run: find data/parsed -type f -printf '%p %s bytes\n' | sort
 
       - name: Upload historical data and diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: historical-v2-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: historical-v3-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: data/parsed
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
+
+      - name: Enforce critical collection results
+        if: always()
+        shell: bash
+        env:
+          INPUT_VALIDATION: ${{ steps.validate_inputs.outcome }}
+          INSTALL_TEST: ${{ steps.install_test.outcome }}
+          ELEXON_CORE: ${{ steps.elexon_core.outcome }}
+          NESO_EMBEDDED: ${{ steps.neso_embedded.outcome }}
+          NESO_INERTIA: ${{ steps.neso_inertia.outcome }}
+          WEATHER_DEMAND: ${{ steps.weather_demand.outcome }}
+          WEATHER_WIND: ${{ steps.weather_wind.outcome }}
+          WEATHER_SOLAR: ${{ steps.weather_solar.outcome }}
+          ELEXON_UNITS: ${{ steps.elexon_units.outcome }}
+          ENTSOE: ${{ steps.entsoe.outcome }}
+        run: |
+          failed=0
+          for name in INPUT_VALIDATION INSTALL_TEST ELEXON_CORE NESO_EMBEDDED NESO_INERTIA WEATHER_DEMAND WEATHER_WIND WEATHER_SOLAR; do
+            [ "${!name}" = "success" ] || { echo "Critical step $name: ${!name}"; failed=1; }
+          done
+          [ "$ELEXON_UNITS" = "success" ] || echo "Advisory: B1610 units ended with $ELEXON_UNITS"
+          [ "$ENTSOE" = "success" ] || echo "Advisory: ENTSO-E ended with $ENTSOE"
+          exit "$failed"
