@@ -1,0 +1,356 @@
+name: Train production candidate V1
+run-name: Production candidate ${{ inputs.start_date }} to ${{ inputs.end_date }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_history_run_id:
+        description: Historical V4 run covering the first contiguous interval
+        required: true
+        default: "30589833583"
+      second_history_run_id:
+        description: Historical V4 run covering the second contiguous interval
+        required: true
+        default: "30589892204"
+      start_date:
+        description: Inclusive first GB settlement date
+        required: true
+        default: "2025-04-01"
+      end_date:
+        description: Exclusive final GB settlement date
+        required: true
+        default: "2026-04-01"
+      holdout_rows:
+        description: Chronological holdout periods; 4320 is 90 standard days
+        required: true
+        default: "4320"
+      time_series_splits:
+        description: Expanding-window out-of-fold splits
+        required: true
+        default: "5"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: production-candidate-${{ inputs.start_date }}-${{ inputs.end_date }}
+  cancel-in-progress: false
+
+jobs:
+  merge-build-train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Bootstrap output directories
+        shell: bash
+        run: |
+          mkdir -p inputs/history_1 inputs/history_2
+          mkdir -p data/parsed data/processed models/production_candidate outputs/production_candidate
+
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Validate production-candidate inputs
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          HOLDOUT_ROWS: ${{ inputs.holdout_rows }}
+          SPLITS: ${{ inputs.time_series_splits }}
+          FIRST_RUN: ${{ inputs.first_history_run_id }}
+          SECOND_RUN: ${{ inputs.second_history_run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import date
+          from pathlib import Path
+
+          start = date.fromisoformat(os.environ["START_DATE"])
+          end = date.fromisoformat(os.environ["END_DATE"])
+          days = (end - start).days
+          if days < 365:
+              raise SystemExit("Production-candidate training requires at least 365 days")
+          if days > 732:
+              raise SystemExit("One candidate run is limited to two years")
+          expected_rows = days * 48
+          holdout = int(os.environ["HOLDOUT_ROWS"])
+          splits = int(os.environ["SPLITS"])
+          if holdout < 48 * 60:
+              raise SystemExit("Use at least a 60-day chronological holdout")
+          if holdout >= expected_rows - 48 * 120:
+              raise SystemExit("The holdout must leave at least 120 days for training")
+          if not 3 <= splits <= 7:
+              raise SystemExit("time_series_splits must be between 3 and 7")
+          for key in ("FIRST_RUN", "SECOND_RUN"):
+              if not os.environ[key].isdigit():
+                  raise SystemExit(f"{key} must be a numeric GitHub Actions run ID")
+          payload = {
+              "workflow_revision": "production-candidate-v1",
+              "source_history_run_ids": [os.environ["FIRST_RUN"], os.environ["SECOND_RUN"]],
+              "start_date_inclusive": str(start),
+              "end_date_exclusive": str(end),
+              "requested_days": days,
+              "nominal_half_hour_rows": expected_rows,
+              "holdout_rows": holdout,
+              "time_series_splits": splits,
+              "model_profile": "core_without_battery",
+          }
+          Path("outputs/production_candidate/workflow_context.json").write_text(
+              json.dumps(payload, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(payload, indent=2))
+          PY
+
+      - name: Download first audited historical artifact
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.first_history_run_id }}
+        run: |
+          timeout 10m gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "historical-v4-run-${RUN_ID}-attempt-1" \
+            --dir inputs/history_1
+
+      - name: Download second audited historical artifact
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.second_history_run_id }}
+        run: |
+          timeout 10m gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "historical-v4-run-${RUN_ID}-attempt-1" \
+            --dir inputs/history_2
+
+      - name: Verify downloaded artifact manifests
+        shell: bash
+        run: |
+          for directory in inputs/history_1 inputs/history_2; do
+            test -f "$directory/workflow_context.json"
+            test -f "$directory/workflow_status.json"
+            test -f "$directory/data_audit.json"
+            test -f "$directory/elexon/elexon_mid.parquet"
+            test -f "$directory/neso/embedded.parquet"
+            test -f "$directory/neso/inertia.parquet"
+          done
+          find inputs -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+
+      - name: Merge and reconstruct point-in-time source tree
+        run: >-
+          timeout 35m python -m gb_platform_v2.history_artifacts
+          --inputs inputs/history_1 inputs/history_2
+          --output data/parsed
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
+          --issue-hour 13
+          --issue-minute 0
+          --summary outputs/production_candidate/history_merge_summary.json
+
+      - name: Build complete core training table
+        run: >-
+          timeout 25m gb-v2 build-dataset
+          --mapping config/data_mapping_core.yaml
+          --output data/processed/gb_half_hourly_core_12m.parquet
+
+      - name: Validate final training table
+        shell: bash
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import pandas as pd
+
+          path = Path("data/processed/gb_half_hourly_core_12m.parquet")
+          frame = pd.read_parquet(path)
+          frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+          start = pd.Timestamp(os.environ["START_DATE"]).tz_localize("Europe/London").tz_convert("UTC")
+          end = pd.Timestamp(os.environ["END_DATE"]).tz_localize("Europe/London").tz_convert("UTC")
+          expected = pd.date_range(start, end, freq="30min", inclusive="left")
+          required = [
+              "price_gbp_mwh", "demand_mw", "embedded_wind_mw",
+              "embedded_solar_mw", "transmission_wind_mw", "nuclear_mw",
+              "net_import_mw", "inertia_gvas",
+          ]
+          missing_columns = sorted(set(required) - set(frame.columns))
+          if missing_columns:
+              raise SystemExit(f"Missing required training columns: {missing_columns}")
+          timestamps = pd.DatetimeIndex(frame["timestamp"])
+          missing_times = expected.difference(timestamps)
+          extra_times = timestamps.difference(expected)
+          duplicate_count = int(frame["timestamp"].duplicated().sum())
+          nulls = frame[required].isna().sum()
+          nulls = {key: int(value) for key, value in nulls.items() if value}
+          if len(frame) != len(expected) or len(missing_times) or len(extra_times) or duplicate_count or nulls:
+              raise SystemExit(json.dumps({
+                  "rows": len(frame), "expected_rows": len(expected),
+                  "missing_timestamps": len(missing_times),
+                  "extra_timestamps": len(extra_times),
+                  "duplicate_timestamps": duplicate_count,
+                  "required_nulls": nulls,
+              }, indent=2))
+          if set(frame["model_profile"].astype(str)) != {"core_without_battery"}:
+              raise SystemExit("Unexpected model profile")
+          selected_publication = pd.to_datetime(
+              frame.get("published_at_utc"), utc=True, errors="coerce"
+          ) if "published_at_utc" in frame else None
+          issue = pd.to_datetime(frame["issue_time_utc"], utc=True)
+          leakage_count = int((selected_publication > issue).fillna(False).sum()) if selected_publication is not None else 0
+          if leakage_count:
+              raise SystemExit(f"Embedded forecast leakage rows: {leakage_count}")
+          summary = {
+              "rows": int(len(frame)),
+              "columns": int(len(frame.columns)),
+              "timestamp_min": timestamps.min().isoformat(),
+              "timestamp_max": timestamps.max().isoformat(),
+              "expected_end_exclusive": end.isoformat(),
+              "duplicate_timestamps": duplicate_count,
+              "required_target_nulls": nulls,
+              "embedded_publication_leakage_rows": leakage_count,
+              "model_profile": "core_without_battery",
+              "weather_feature_count": len([c for c in frame if c.startswith("weather_")]),
+          }
+          Path("outputs/production_candidate/dataset_summary.json").write_text(
+              json.dumps(summary, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Train production candidate with chronological holdout
+        run: >-
+          timeout 75m gb-v2 train
+          --input data/processed/gb_half_hourly_core_12m.parquet
+          --models models/production_candidate
+          --holdout-rows "${{ inputs.holdout_rows }}"
+          --time-series-splits "${{ inputs.time_series_splits }}"
+
+      - name: Assess candidate without enabling live deployment
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          metadata_path = Path("models/production_candidate/metadata.json")
+          metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+          metrics = metadata["metrics"]
+          price = metrics["price_gbp_mwh"]
+          component_metrics = {
+              key: value for key, value in metrics.items() if key != "price_gbp_mwh"
+          }
+          beating = sorted(
+              key for key, value in component_metrics.items()
+              if value.get("improvement_percent", 0.0) > 0
+          )
+          underperforming = sorted(set(component_metrics) - set(beating))
+          assessment = {
+              "candidate_id": "core-12m-v1",
+              "model_profile": metadata.get("model_profile"),
+              "price_model_mae_gbp_mwh": price.get("model_mae"),
+              "price_persistence_mae_gbp_mwh": price.get("baseline_mae"),
+              "price_improvement_percent": price.get("improvement_percent"),
+              "components_beating_persistence": beating,
+              "components_not_beating_persistence": underperforming,
+              "data_integrity_gate": "passed",
+              "training_gate": "passed",
+              "deployment_ready": False,
+              "remaining_blockers": [
+                  "Review the 90-day holdout metrics and error distributions.",
+                  "Build and validate a genuine day-ahead future-feature workflow.",
+                  "Run shadow forecasts and immutable grading before operational use.",
+                  "Add validated B1610 battery classification for the full profile.",
+              ],
+          }
+          output = Path("outputs/production_candidate/candidate_assessment.json")
+          output.write_text(json.dumps(assessment, indent=2), encoding="utf-8")
+          Path("outputs/production_candidate/model_metadata.json").write_text(
+              json.dumps(metadata, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(assessment, indent=2))
+          PY
+
+      - name: Audit candidate outputs
+        if: always()
+        continue-on-error: true
+        run: >-
+          python -m gb_platform_v2.data_audit
+          --input data
+          --output outputs/production_candidate/data_audit.json
+
+      - name: Write workflow status
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          required = [
+              "outputs/production_candidate/history_merge_summary.json",
+              "outputs/production_candidate/dataset_summary.json",
+              "outputs/production_candidate/model_metadata.json",
+              "outputs/production_candidate/candidate_assessment.json",
+              "data/processed/gb_half_hourly_core_12m.parquet",
+              "models/production_candidate/price_gbp_mwh.joblib",
+              "models/production_candidate/historical_component_errors.parquet",
+          ]
+          status = {
+              "workflow_revision": "production-candidate-v1",
+              "required_files": {path: Path(path).exists() for path in required},
+          }
+          status["complete"] = all(status["required_files"].values())
+          Path("outputs/production_candidate/workflow_status.json").write_text(
+              json.dumps(status, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(status, indent=2))
+          PY
+
+      - name: Print candidate inventory
+        if: always()
+        shell: bash
+        run: |
+          find data/processed models/production_candidate outputs/production_candidate \
+            -type f -printf '%p %s bytes\n' | sort || true
+
+      - name: Upload production-candidate artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: production-candidate-v1-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            data/processed
+            models/production_candidate
+            outputs/production_candidate
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce complete candidate artifact
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("outputs/production_candidate/workflow_status.json")
+          if not path.exists():
+              raise SystemExit("workflow_status.json was not created")
+          status = json.loads(path.read_text(encoding="utf-8"))
+          if not status.get("complete"):
+              raise SystemExit(f"Production candidate is incomplete: {status}")
+          print("Production-candidate artifact is complete. Live deployment remains disabled.")
+          PY
