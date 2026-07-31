@@ -1,4 +1,4 @@
-name: Shadow day-ahead forecast V3
+name: Shadow day-ahead forecast V4
 run-name: Shadow forecast ${{ inputs.delivery_date || 'next GB day' }}
 
 on:
@@ -61,8 +61,7 @@ jobs:
           from zoneinfo import ZoneInfo
 
           now = datetime.now(timezone.utc)
-          london = ZoneInfo("Europe/London")
-          local = now.astimezone(london)
+          local = now.astimezone(ZoneInfo("Europe/London"))
           manual = os.environ.get("MANUAL_DATE", "").strip()
           proceed = True
           if os.environ["EVENT_NAME"] == "schedule":
@@ -75,13 +74,7 @@ jobs:
               handle.write(f"proceed={str(proceed).lower()}\n")
               handle.write(f"delivery_date={delivery}\n")
               handle.write(f"issue_time_utc={now.isoformat()}\n")
-          print({
-              "proceed": proceed,
-              "delivery_date": delivery,
-              "issue_time_utc": now.isoformat(),
-              "actual_local_time": local.isoformat(),
-              "event_schedule": os.environ.get("EVENT_SCHEDULE"),
-          })
+          print({"proceed": proceed, "delivery_date": delivery, "issue_time_utc": now.isoformat()})
           PY
 
       - name: Install and test
@@ -97,10 +90,7 @@ jobs:
           TAG: ${{ inputs.release_tag || 'operational-core-v1' }}
         run: |
           mkdir -p operational_bundle
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern operational-core-v1.zip \
-            --dir operational_bundle
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern operational-core-v1.zip --dir operational_bundle
           unzip -q operational_bundle/operational-core-v1.zip -d operational_bundle/unpacked
           test -f operational_bundle/unpacked/models/metadata.json
           test -f operational_bundle/unpacked/models/operational_component_errors.parquet
@@ -160,56 +150,61 @@ jobs:
           --run-attempt "${{ github.run_attempt }}"
           --scenarios "${{ inputs.scenarios || '1000' }}"
 
-      - name: Validate shadow output
+      - name: Build full market report
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          python -m gb_platform_v2.market_report
+          --system-forecast outputs/shadow/forecast/half_hourly_system_forecast.csv
+          --price-forecast outputs/shadow/forecast/half_hourly_price_forecast.csv
+          --daily-report outputs/shadow/forecast/daily_report.json
+          --feature-summary outputs/shadow/feature_summary.json
+          --output-dir "logs/daily/${{ steps.dates.outputs.delivery_date }}/market-report-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          --delivery-date "${{ steps.dates.outputs.delivery_date }}"
+          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --scenarios "${{ inputs.scenarios || '1000' }}"
+          --paper-capital-gbp 500000
+          --var-budget-fraction 0.02
+          --reference-position-mwh 100
+          --confidence-level 0.95
+
+      - name: Validate complete report
         if: steps.dates.outputs.proceed == 'true'
         shell: bash
         run: |
           python - <<'PY'
-          import json
           from pathlib import Path
           import pandas as pd
 
-          features = json.loads(Path("outputs/shadow/feature_summary.json").read_text())
-          forecast = pd.read_csv("outputs/shadow/forecast/half_hourly_price_forecast.csv")
-          store = pd.read_csv("live/forecasts.csv")
-          risk_log = pd.read_csv("live/risk_log.csv")
-          review = pd.read_csv("logs/daily_summary.csv")
-          expected = int(features["expected_period_count"])
-          if len(forecast) != expected:
-              raise SystemExit(f"Forecast rows {len(forecast)} != expected {expected}")
-          version = "${{ inputs.model_version || 'core-12m-operational-v1' }}"
           delivery = "${{ steps.dates.outputs.delivery_date }}"
-          selected = store.loc[
-              store["model_version"].astype(str).eq(version)
-              & pd.to_datetime(store["delivery_time_utc"], utc=True).dt.tz_convert("Europe/London").dt.date.astype(str).eq(delivery)
+          root = Path(f"logs/daily/{delivery}/market-report-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}")
+          required = [
+              root / "report.md",
+              root / "report.json",
+              root / "half_hourly_system_and_price_table.csv",
+              root / "daily_system_summary.csv",
+              root / "var_and_position_limits.csv",
+              root / "plots/01_system_components.png",
+              root / "plots/02_residual_demand.png",
+              root / "plots/03_wind_solar_breakdown.png",
+              root / "plots/04_net_imports_and_inertia.png",
+              root / "plots/05_price_fan.png",
+              root / "plots/06_negative_price_probability.png",
+              root / "plots/07_risk_position_limits.png",
           ]
-          if len(selected) < expected:
-              raise SystemExit("Immutable forecast store does not contain the complete delivery day")
-          risk_rows = risk_log.loc[
-              risk_log["model_version"].astype(str).eq(version)
-              & risk_log["delivery_date"].astype(str).eq(delivery)
-          ]
-          if risk_rows.empty:
-              raise SystemExit("Permanent risk log does not contain this delivery day")
-          review_rows = review.loc[review["delivery_date"].astype(str).eq(delivery)]
-          if review_rows.empty or review_rows["scenario_var_gbp"].isna().all():
-              raise SystemExit("Unified review log does not contain the forecast and VaR")
-          report_path = Path(str(risk_rows.iloc[-1]["report_path"]))
-          if not report_path.exists():
-              raise SystemExit(f"Permanent daily report is missing: {report_path}")
-          if not Path("logs/README.md").exists():
-              raise SystemExit("Review-log dashboard is missing")
-          print({
-              "forecast_rows": len(forecast),
-              "stored_rows_for_day": len(selected),
-              "risk_log_rows_for_day": len(risk_rows),
-              "review_log_rows_for_day": len(review_rows),
-              "daily_report": str(report_path),
-              "delivery_date": delivery,
-          })
+          missing = [str(path) for path in required if not path.exists()]
+          if missing:
+              raise SystemExit(f"Complete market report is missing files: {missing}")
+          limits = pd.read_csv(root / "var_and_position_limits.csv")
+          binding = limits.loc[limits["metric"].eq("Binding maximum permissible volume"), "value"]
+          if binding.empty or float(binding.iloc[0]) <= 0:
+              raise SystemExit("Maximum permissible volume was not calculated")
+          print({"report": str(root / "report.md"), "binding_maximum_volume_mwh": float(binding.iloc[0])})
           PY
 
-      - name: Commit immutable forecast risk and review logs
+      - name: Commit forecast risk review and market reports
         if: steps.dates.outputs.proceed == 'true'
         shell: bash
         run: |
@@ -217,14 +212,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add live/forecasts.csv live/risk_log.csv live/reports logs
           if ! git diff --cached --quiet; then
-            git commit -m "Shadow forecast ${{ steps.dates.outputs.delivery_date }}"
+            git commit -m "Shadow forecast and market report ${{ steps.dates.outputs.delivery_date }}"
             git pull --rebase origin main
             git push origin HEAD:main
-          else
-            echo "No new immutable forecast risk or review rows"
           fi
 
-      - name: Upload shadow forecast evidence
+      - name: Upload forecast and market-report evidence
         if: always() && steps.dates.outputs.proceed == 'true'
         uses: actions/upload-artifact@v6
         with:
