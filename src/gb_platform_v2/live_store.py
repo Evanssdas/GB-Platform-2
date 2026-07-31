@@ -85,6 +85,27 @@ def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
     out = rows.copy()
     out["issue_time_utc"] = pd.to_datetime(out["issue_time_utc"], utc=True)
     out["delivery_time_utc"] = pd.to_datetime(out["delivery_time_utc"], utc=True)
+
+    versions = out["model_version"].astype(str).unique()
+    delivery_days = (
+        out["delivery_time_utc"].dt.tz_convert("Europe/London").dt.date.astype(str).unique()
+    )
+    if len(versions) != 1 or len(delivery_days) != 1:
+        raise ValueError("One append_forecasts call must contain one model version and one GB delivery day")
+
+    existing = _read(path)
+    if not existing.empty:
+        existing_times = pd.to_datetime(existing["delivery_time_utc"], utc=True, errors="raise")
+        existing_days = existing_times.dt.tz_convert("Europe/London").dt.date.astype(str)
+        duplicate_day = existing["model_version"].astype(str).eq(versions[0]) & existing_days.eq(
+            delivery_days[0]
+        )
+        if duplicate_day.any():
+            raise ValueError(
+                "Refusing a second forecast for the same model version and GB delivery day: "
+                f"model_version={versions[0]}, delivery_date={delivery_days[0]}"
+            )
+
     if "forecast_id" not in out:
         out["forecast_id"] = (
             out["model_version"].astype(str)
