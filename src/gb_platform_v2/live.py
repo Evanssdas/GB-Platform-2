@@ -43,6 +43,8 @@ def run_and_log_forecast(
     prices["model_version"] = model_version
     issue = pd.Timestamp(issue_time_utc)
     issue = issue.tz_localize("UTC") if issue.tzinfo is None else issue.tz_convert("UTC")
+    if (prices["delivery_time_utc"] <= issue).any():
+        raise ValueError("Forecast delivery periods must all be later than issue time")
     prices["issue_time_utc"] = issue
     append_forecasts(
         prices[
@@ -62,14 +64,38 @@ def run_and_log_forecast(
     return report
 
 
+def _gb_settlement_boundary_utc(value: str | pd.Timestamp) -> pd.Timestamp:
+    day = pd.Timestamp(value).tz_localize(None).normalize()
+    return day.tz_localize("Europe/London").tz_convert("UTC")
+
+
 def collect_and_append_price_actuals(
     start: str,
     end: str,
     actuals_path: str | Path,
     revision: str,
 ) -> pd.DataFrame:
-    """Collect APXMIDP actuals and append them as a named source revision."""
-    parsed = parse_elexon_mid(ElexonClient().market_index(start, end))
+    """Collect APXMIDP actuals for a GB settlement-date ``[start, end)`` window."""
+    start_utc = _gb_settlement_boundary_utc(start)
+    end_utc = _gb_settlement_boundary_utc(end)
+    parsed = parse_elexon_mid(
+        ElexonClient().market_index(
+            start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    )
+    parsed["timestamp"] = pd.to_datetime(parsed["timestamp"], utc=True)
+    parsed = parsed.loc[
+        parsed["timestamp"].between(start_utc, end_utc, inclusive="left")
+    ].copy()
+    expected = pd.date_range(start_utc, end_utc, freq="30min", inclusive="left")
+    actual = pd.DatetimeIndex(parsed["timestamp"])
+    missing = expected.difference(actual)
+    if len(parsed) != len(expected) or len(missing):
+        raise ValueError(
+            "APXMIDP actuals do not cover the complete GB settlement day: "
+            f"rows={len(parsed)}, expected={len(expected)}, missing={len(missing)}"
+        )
     actuals = parsed.rename(
         columns={"timestamp": "delivery_time_utc", "price_gbp_mwh": "actual_price"}
     )[["delivery_time_utc", "actual_price"]]
