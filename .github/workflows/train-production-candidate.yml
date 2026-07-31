@@ -1,4 +1,4 @@
-name: Train production candidate V1
+name: Train production candidate V2
 run-name: Production candidate ${{ inputs.start_date }} to ${{ inputs.end_date }}
 
 on:
@@ -86,12 +86,12 @@ jobs:
               raise SystemExit("Production-candidate training requires at least 365 days")
           if days > 732:
               raise SystemExit("One candidate run is limited to two years")
-          expected_rows = days * 48
+          nominal_rows = days * 48
           holdout = int(os.environ["HOLDOUT_ROWS"])
           splits = int(os.environ["SPLITS"])
           if holdout < 48 * 60:
               raise SystemExit("Use at least a 60-day chronological holdout")
-          if holdout >= expected_rows - 48 * 120:
+          if holdout >= nominal_rows - 48 * 120:
               raise SystemExit("The holdout must leave at least 120 days for training")
           if not 3 <= splits <= 7:
               raise SystemExit("time_series_splits must be between 3 and 7")
@@ -99,12 +99,12 @@ jobs:
               if not os.environ[key].isdigit():
                   raise SystemExit(f"{key} must be a numeric GitHub Actions run ID")
           payload = {
-              "workflow_revision": "production-candidate-v1",
+              "workflow_revision": "production-candidate-v2",
               "source_history_run_ids": [os.environ["FIRST_RUN"], os.environ["SECOND_RUN"]],
               "start_date_inclusive": str(start),
               "end_date_exclusive": str(end),
               "requested_days": days,
-              "nominal_half_hour_rows": expected_rows,
+              "nominal_half_hour_rows": nominal_rows,
               "holdout_rows": holdout,
               "time_series_splits": splits,
               "model_profile": "core_without_battery",
@@ -165,7 +165,7 @@ jobs:
           --mapping config/data_mapping_core.yaml
           --output data/processed/gb_half_hourly_core_12m.parquet
 
-      - name: Validate final training table
+      - name: Validate leakage-safe training table
         shell: bash
         env:
           START_DATE: ${{ inputs.start_date }}
@@ -177,12 +177,36 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
-          path = Path("data/processed/gb_half_hourly_core_12m.parquet")
-          frame = pd.read_parquet(path)
+          data_path = Path("data/processed/gb_half_hourly_core_12m.parquet")
+          merge_path = Path("outputs/production_candidate/history_merge_summary.json")
+          frame = pd.read_parquet(data_path)
+          merge = json.loads(merge_path.read_text(encoding="utf-8"))
           frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+
           start = pd.Timestamp(os.environ["START_DATE"]).tz_localize("Europe/London").tz_convert("UTC")
           end = pd.Timestamp(os.environ["END_DATE"]).tz_localize("Europe/London").tz_convert("UTC")
-          expected = pd.date_range(start, end, freq="30min", inclusive="left")
+          full_calendar = pd.date_range(start, end, freq="30min", inclusive="left")
+          excluded_dates = list(merge.get("excluded_settlement_dates_local", []))
+          excluded = pd.DatetimeIndex([], tz="UTC")
+          for day_text in excluded_dates:
+              day = pd.Timestamp(day_text)
+              day_end = day + pd.Timedelta(days=1)
+              day_clock = pd.date_range(
+                  day.tz_localize("Europe/London").tz_convert("UTC"),
+                  day_end.tz_localize("Europe/London").tz_convert("UTC"),
+                  freq="30min",
+                  inclusive="left",
+              )
+              excluded = excluded.union(day_clock)
+          expected = full_calendar.difference(excluded)
+
+          if int(merge.get("full_calendar_half_hour_rows", -1)) != len(full_calendar):
+              raise SystemExit("Merge summary full-calendar row count is inconsistent")
+          if int(merge.get("training_half_hour_rows", -1)) != len(expected):
+              raise SystemExit("Merge summary training row count is inconsistent")
+          if int(merge.get("excluded_half_hour_rows", -1)) != len(excluded):
+              raise SystemExit("Merge summary excluded row count is inconsistent")
+
           required = [
               "price_gbp_mwh", "demand_mw", "embedded_wind_mw",
               "embedded_solar_mw", "transmission_wind_mw", "nuclear_mw",
@@ -194,28 +218,50 @@ jobs:
           timestamps = pd.DatetimeIndex(frame["timestamp"])
           missing_times = expected.difference(timestamps)
           extra_times = timestamps.difference(expected)
+          removed_from_calendar = full_calendar.difference(timestamps)
+          unrecorded_removed = removed_from_calendar.difference(excluded)
           duplicate_count = int(frame["timestamp"].duplicated().sum())
           nulls = frame[required].isna().sum()
           nulls = {key: int(value) for key, value in nulls.items() if value}
-          if len(frame) != len(expected) or len(missing_times) or len(extra_times) or duplicate_count or nulls:
+          if (
+              len(frame) != len(expected)
+              or len(missing_times)
+              or len(extra_times)
+              or len(unrecorded_removed)
+              or duplicate_count
+              or nulls
+          ):
               raise SystemExit(json.dumps({
-                  "rows": len(frame), "expected_rows": len(expected),
-                  "missing_timestamps": len(missing_times),
+                  "rows": len(frame),
+                  "expected_training_rows": len(expected),
+                  "full_calendar_rows": len(full_calendar),
+                  "recorded_excluded_rows": len(excluded),
+                  "missing_training_timestamps": len(missing_times),
                   "extra_timestamps": len(extra_times),
+                  "unrecorded_removed_timestamps": len(unrecorded_removed),
                   "duplicate_timestamps": duplicate_count,
                   "required_nulls": nulls,
               }, indent=2))
           if set(frame["model_profile"].astype(str)) != {"core_without_battery"}:
               raise SystemExit("Unexpected model profile")
-          selected_publication = pd.to_datetime(
-              frame.get("published_at_utc"), utc=True, errors="coerce"
-          ) if "published_at_utc" in frame else None
+          selected_publication = (
+              pd.to_datetime(frame["published_at_utc"], utc=True, errors="coerce")
+              if "published_at_utc" in frame
+              else None
+          )
           issue = pd.to_datetime(frame["issue_time_utc"], utc=True)
-          leakage_count = int((selected_publication > issue).fillna(False).sum()) if selected_publication is not None else 0
+          leakage_count = (
+              int((selected_publication > issue).fillna(False).sum())
+              if selected_publication is not None
+              else 0
+          )
           if leakage_count:
               raise SystemExit(f"Embedded forecast leakage rows: {leakage_count}")
           summary = {
               "rows": int(len(frame)),
+              "full_calendar_rows": int(len(full_calendar)),
+              "excluded_rows": int(len(excluded)),
+              "excluded_settlement_dates_local": excluded_dates,
               "columns": int(len(frame.columns)),
               "timestamp_min": timestamps.min().isoformat(),
               "timestamp_max": timestamps.max().isoformat(),
@@ -225,6 +271,7 @@ jobs:
               "embedded_publication_leakage_rows": leakage_count,
               "model_profile": "core_without_battery",
               "weather_feature_count": len([c for c in frame if c.startswith("weather_")]),
+              "gap_policy": "only complete archive-seam days explicitly recorded by the merger may be excluded",
           }
           Path("outputs/production_candidate/dataset_summary.json").write_text(
               json.dumps(summary, indent=2), encoding="utf-8"
@@ -249,6 +296,11 @@ jobs:
 
           metadata_path = Path("models/production_candidate/metadata.json")
           metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+          merge = json.loads(
+              Path("outputs/production_candidate/history_merge_summary.json").read_text(
+                  encoding="utf-8"
+              )
+          )
           metrics = metadata["metrics"]
           price = metrics["price_gbp_mwh"]
           component_metrics = {
@@ -260,11 +312,17 @@ jobs:
           )
           underperforming = sorted(set(component_metrics) - set(beating))
           assessment = {
-              "candidate_id": "core-12m-v1",
+              "candidate_id": "core-12m-v2",
               "model_profile": metadata.get("model_profile"),
+              "training_rows": merge.get("training_half_hour_rows"),
+              "excluded_settlement_dates_local": merge.get(
+                  "excluded_settlement_dates_local", []
+              ),
               "price_model_mae_gbp_mwh": price.get("model_mae"),
               "price_persistence_mae_gbp_mwh": price.get("baseline_mae"),
               "price_improvement_percent": price.get("improvement_percent"),
+              "price_comparison_rows": price.get("comparison_rows"),
+              "persistence_definition": price.get("baseline_definition"),
               "components_beating_persistence": beating,
               "components_not_beating_persistence": underperforming,
               "data_integrity_gate": "passed",
@@ -277,8 +335,9 @@ jobs:
                   "Add validated B1610 battery classification for the full profile.",
               ],
           }
-          output = Path("outputs/production_candidate/candidate_assessment.json")
-          output.write_text(json.dumps(assessment, indent=2), encoding="utf-8")
+          Path("outputs/production_candidate/candidate_assessment.json").write_text(
+              json.dumps(assessment, indent=2), encoding="utf-8"
+          )
           Path("outputs/production_candidate/model_metadata.json").write_text(
               json.dumps(metadata, indent=2), encoding="utf-8"
           )
@@ -310,7 +369,7 @@ jobs:
               "models/production_candidate/historical_component_errors.parquet",
           ]
           status = {
-              "workflow_revision": "production-candidate-v1",
+              "workflow_revision": "production-candidate-v2",
               "required_files": {path: Path(path).exists() for path in required},
           }
           status["complete"] = all(status["required_files"].values())
@@ -331,7 +390,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: production-candidate-v1-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: production-candidate-v2-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
             data/processed
             models/production_candidate
