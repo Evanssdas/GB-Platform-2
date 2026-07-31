@@ -1,4 +1,4 @@
-name: Daily APXMIDP grading V3
+name: Daily APXMIDP grading V4
 run-name: Grade APXMIDP ${{ inputs.delivery_date || 'previous GB day' }}
 
 on:
@@ -97,7 +97,20 @@ jobs:
           --coverage-max 0.90
           --min-lead-hours 8
 
-      - name: Validate immutable output files
+      - name: Register grading in unified review logs
+        run: >-
+          python -m gb_platform_v2.review_logs grading
+          --logs-root logs
+          --actuals live/actuals.csv
+          --scores live/scores.csv
+          --deployment-gate live/deployment_gate.json
+          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          --delivery-date "${{ steps.dates.outputs.day }}"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --actual-revision initial
+
+      - name: Validate immutable output files and review logs
         shell: bash
         run: |
           python - <<'PY'
@@ -112,13 +125,25 @@ jobs:
           if frame.empty:
               raise SystemExit("Actual-price file is empty")
           gate = json.loads(Path("live/deployment_gate.json").read_text())
-          print({"actual_rows": len(frame), "deployment_ready": gate["deployment_ready"], "gate_mode": gate["mode"]})
+          summary = pd.read_csv("logs/daily_summary.csv")
+          delivery = "${{ steps.dates.outputs.day }}"
+          review_rows = summary.loc[summary["delivery_date"].astype(str).eq(delivery)]
+          if review_rows.empty:
+              raise SystemExit("Unified review log does not contain the graded delivery date")
+          if not Path("logs/README.md").exists():
+              raise SystemExit("Review-log dashboard is missing")
+          print({
+              "actual_rows": len(frame),
+              "deployment_ready": gate["deployment_ready"],
+              "gate_mode": gate["mode"],
+              "review_rows_for_day": len(review_rows),
+          })
           scores = Path("live/scores.csv")
           if scores.exists():
               print({"score_rows": len(pd.read_csv(scores))})
           PY
 
-      - name: Upload grading and gate evidence
+      - name: Upload grading gate and review evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
@@ -127,20 +152,21 @@ jobs:
             live/actuals.csv
             live/scores.csv
             live/deployment_gate.json
+            logs
           if-no-files-found: warn
           retention-days: 90
 
-      - name: Commit immutable actuals scores and gate
+      - name: Commit immutable actuals scores gate and review logs
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add live/actuals.csv live/deployment_gate.json
+          git add live/actuals.csv live/deployment_gate.json logs
           [ ! -f live/scores.csv ] || git add live/scores.csv
           if ! git diff --cached --quiet; then
             git commit -m "Grade APXMIDP ${{ steps.dates.outputs.day }}"
             git pull --rebase origin main
             git push origin HEAD:main
           else
-            echo "No new actuals scores or gate state to commit"
+            echo "No new actuals scores gate or review state to commit"
           fi
