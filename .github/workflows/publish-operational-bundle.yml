@@ -1,0 +1,122 @@
+name: Publish operational core bundle V1
+run-name: Publish operational core from candidate ${{ inputs.candidate_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful production-candidate V2 run ID
+        required: true
+        default: "30632362891"
+      release_tag:
+        description: Immutable operational release tag
+        required: true
+        default: operational-core-v1
+      model_version:
+        description: Model version written to shadow forecasts
+        required: true
+        default: core-12m-operational-v1
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-operational-core-v1
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Download audited production candidate
+        env:
+          RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          mkdir -p candidate
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "production-candidate-v2-run-${RUN_ID}-attempt-1" \
+            --dir candidate
+
+      - name: Validate candidate and prepare hybrid operational bundle
+        shell: bash
+        env:
+          MODEL_VERSION: ${{ inputs.model_version }}
+        run: |
+          test -f candidate/outputs/production_candidate/workflow_status.json
+          test -f candidate/outputs/production_candidate/candidate_assessment.json
+          test -f candidate/data/processed/gb_half_hourly_core_12m.parquet
+          test -f candidate/models/production_candidate/metadata.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          status = json.loads(Path("candidate/outputs/production_candidate/workflow_status.json").read_text())
+          if not status.get("complete"):
+              raise SystemExit(f"Candidate artifact is incomplete: {status}")
+          PY
+          python -m gb_platform_v2.operational_bundle \
+            --dataset candidate/data/processed/gb_half_hourly_core_12m.parquet \
+            --models candidate/models/production_candidate \
+            --holdout-rows 4320 \
+            --summary candidate/outputs/production_candidate/operational_bundle.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("candidate/models/production_candidate/metadata.json")
+          metadata = json.loads(path.read_text())
+          metadata["model_version"] = os.environ["MODEL_VERSION"]
+          metadata["release_status"] = "shadow_only"
+          path.write_text(json.dumps(metadata, indent=2))
+          PY
+
+      - name: Build release archive
+        run: |
+          mkdir -p release/models release/metadata
+          cp -a candidate/models/production_candidate/. release/models/
+          cp candidate/outputs/production_candidate/operational_bundle.json release/metadata/
+          cp candidate/outputs/production_candidate/candidate_assessment.json release/metadata/
+          cp candidate/outputs/production_candidate/dataset_summary.json release/metadata/
+          cp candidate/outputs/production_candidate/history_merge_summary.json release/metadata/
+          printf '%s\n' '${{ github.sha }}' > release/metadata/repository_commit.txt
+          (cd release && zip -qr ../operational-core-v1.zip .)
+          sha256sum operational-core-v1.zip | tee operational-core-v1.zip.sha256
+
+      - name: Create or update immutable shadow release
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" operational-core-v1.zip operational-core-v1.zip.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" operational-core-v1.zip operational-core-v1.zip.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Operational core model V1 — shadow only" \
+              --notes "Frozen core_without_battery model bundle. Shadow forecasting only until the 30-day deployment gate passes."
+          fi
+
+      - name: Upload publication diagnostics
+        uses: actions/upload-artifact@v6
+        with:
+          name: operational-core-publication-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            operational-core-v1.zip.sha256
+            candidate/outputs/production_candidate/operational_bundle.json
+          retention-days: 90
