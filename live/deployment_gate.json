@@ -1,0 +1,46 @@
+{
+  "workflow_revision": "deployment-gate-v1",
+  "deployment_ready": false,
+  "mode": "shadow_only",
+  "metrics": {
+    "model_version": "core-12m-operational-v1",
+    "graded_periods": 0,
+    "graded_delivery_days": 0,
+    "model_mae_gbp_mwh": null,
+    "persistence_mae_gbp_mwh": null,
+    "improvement_percent": null,
+    "p10_p90_coverage": null,
+    "minimum_lead_hours": null
+  },
+  "gates": {
+    "minimum_shadow_days": {
+      "passed": false,
+      "required": 30,
+      "observed": 0
+    },
+    "consecutive_delivery_days": {
+      "passed": false,
+      "missing_dates": null
+    },
+    "complete_periods": {
+      "passed": false,
+      "missing_periods": null
+    },
+    "pre_delivery_issue_time": {
+      "passed": false,
+      "required_hours": 8.0
+    },
+    "beats_persistence": {
+      "passed": false,
+      "required_improvement_percent": 5.0
+    },
+    "interval_coverage": {
+      "passed": false,
+      "required_range": [
+        0.7,
+        0.9
+      ]
+    }
+  },
+  "warning": "Passing this software gate supports controlled human review; it is not financial advice or an autonomous trading authorisation."
+}
