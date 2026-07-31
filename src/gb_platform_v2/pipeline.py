@@ -39,6 +39,7 @@ CORE_COMPONENT_TARGETS = [
     "net_import_mw",
     "inertia_gvas",
 ]
+SIGNED_COMPONENT_TARGETS = {"net_import_mw", "battery_net_mw"}
 DERIVED_TARGET_COLUMNS = {
     "total_wind_mw",
     "renewable_mw",
@@ -79,6 +80,30 @@ def _component_targets(frame: pd.DataFrame) -> tuple[str, list[str]]:
     if missing:
         raise KeyError(f"Dataset is missing profile components: {missing}")
     return profile, targets
+
+
+def _apply_component_physical_bounds(
+    frame: pd.DataFrame,
+    targets: list[str],
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Clip physically non-negative component point forecasts at zero.
+
+    Interconnector and battery net flows retain their signs. Generation, demand
+    and inertia cannot be negative. The returned counts make every correction
+    visible in the forecast report rather than silently changing model output.
+    """
+    out = frame.copy()
+    clipped: dict[str, int] = {}
+    for target in targets:
+        if target not in out or target in SIGNED_COMPONENT_TARGETS:
+            clipped[target] = 0
+            continue
+        values = pd.to_numeric(out[target], errors="coerce")
+        if values.isna().any():
+            raise ValueError(f"Component point forecast contains nulls: {target}")
+        clipped[target] = int(values.lt(0).sum())
+        out[target] = values.clip(lower=0.0)
+    return out, clipped
 
 
 def _add_stacked_balance_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -195,7 +220,7 @@ def _operational_component_point_forecasts(
     feature_frame: pd.DataFrame,
     model_dir: Path,
     metadata: dict,
-) -> tuple[pd.DataFrame, dict[str, str]]:
+) -> tuple[pd.DataFrame, dict[str, str], dict[str, int]]:
     point = feature_frame.copy()
     targets = metadata.get("component_targets", FULL_COMPONENT_TARGETS)
     strategy = metadata.get("operational_component_strategy", {})
@@ -220,7 +245,9 @@ def _operational_component_point_forecasts(
             raise ValueError(f"Unsupported operational source for {target}: {source}")
         used[target] = source
         point[f"component_source_{target}"] = source
-    return point, used
+
+    point, clipped_counts = _apply_component_physical_bounds(point, list(targets))
+    return point, used, clipped_counts
 
 
 def forecast_platform(
@@ -236,7 +263,7 @@ def forecast_platform(
     metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
     component_targets = metadata.get("component_targets", FULL_COMPONENT_TARGETS)
 
-    point, component_sources = _operational_component_point_forecasts(
+    point, component_sources, clipped_counts = _operational_component_point_forecasts(
         feature_frame, model_dir, metadata
     )
     point = _add_stacked_balance_features(point)
@@ -272,6 +299,7 @@ def forecast_platform(
     report["model_profile"] = metadata.get("model_profile", "unknown")
     report["operational_bundle_ready"] = bool(metadata.get("operational_bundle_ready"))
     report["component_sources"] = component_sources
+    report["component_point_values_clipped_at_zero"] = clipped_counts
     report["component_error_file"] = error_file
     report["risk"] = scenario_risk(
         result.price_paths,
