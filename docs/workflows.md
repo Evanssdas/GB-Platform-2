@@ -1,7 +1,6 @@
 # Canonical GitHub Actions workflows
 
-The repository uses the following workflows. Obsolete duplicate collectors have
-been removed so the Actions tab has one clear workflow for each purpose.
+The repository uses one canonical workflow for each stage of the GB core platform.
 
 ## 1. CI
 
@@ -14,75 +13,90 @@ manual run also executes the synthetic demonstration and uploads its outputs.
 
 **Use:** validate external data contracts over a window of at most 62 days.
 
-Recommended first window:
-
-- start: `2025-07-01`
-- end: `2025-08-01` (exclusive)
-- embedded: `embedded_2025`
-- inertia: `inertia_2025_26`
-- units: `false`
-
-Critical sources are Elexon core, NESO embedded forecasts, NESO inertia and all
-three weather groups. ENTSO-E and B1610 are advisory in this validation workflow.
-The artifact always contains context, status and audit diagnostics.
+Recommended window: `2025-07-01` to `2025-08-01`, using `embedded_2025`,
+`inertia_2025_26` and no B1610 units. Elexon core, NESO embedded, NESO inertia and
+all three weather groups are critical. ENTSO-E and B1610 are advisory.
 
 ## 3. Build core model smoke test V1
 
 **Use:** prove that real-data table assembly and leakage-safe training work.
 
-This is a software smoke test. The default one-month model is not a production
-forecasting model. Its artifact contains the unified core dataset, fitted model
-files, chronological diagnostic metrics and an audit report.
-
-The core profile deliberately excludes battery output until the B1610 storage
-classification is complete. It does not substitute unavailable battery data with
-zero.
+This is a software smoke test, not a production model. The core profile excludes
+battery output until the BM-unit classification is independently verified.
 
 ## 4. Collect historical data V4
 
-**Use:** collect longer training history after the one-month validator and smoke
-test have passed.
+**Use:** collect audited training history with archive-compatible NESO inputs.
 
-Each run is limited to 366 days and uses bounded source queries, monthly NESO
-chunks and hard source timeouts. The workflow validates that the selected embedded
-and inertia archives cover the requested period before collection begins. Elexon,
-NESO, weather and the final audit are critical; ENTSO-E and B1610 are advisory
-unless explicitly required by a later full-model workflow.
+The validated twelve-month period uses:
 
-For the latest complete twelve-month core-training period, use two archive-compatible
-runs:
+1. `2025-04-01` to `2026-01-01`: `embedded_2025`, `inertia_2025_26`.
+2. `2026-01-01` to `2026-04-01`: `embedded_2026_h1`, `inertia_2025_26`.
 
-1. `2025-04-01` to `2026-01-01`, with `embedded_2025` and `inertia_2025_26`.
-2. `2026-01-01` to `2026-04-01`, with `embedded_2026_h1` and `inertia_2025_26`.
+## 5. Train production candidate V2
 
-These artifacts must be audited and combined before production-candidate training.
+**Use:** merge the two audited historical artifacts, reconstruct D-1 point-in-time
+forecasts, build the core table and train with a 90-day chronological holdout.
 
-## 5. Collect ENTSO-E neighbours V3
+The validated candidate has 17,472 leakage-safe rows. The complete settlement day
+`2026-01-01` is explicitly excluded because neither annual embedded archive
+contained a revision available by the configured D-1 issue time. No future value
+is substituted.
 
-**Use:** diagnose or recollect ENTSO-E products independently.
+## 6. Publish operational core bundle V1
 
-Requires the repository secret `ENTSOE_TOKEN`. Inputs are an inclusive UTC start
-and exclusive UTC end. The workflow validates inputs, runs ENTSO-E tests, applies
-a hard timeout and uploads status diagnostics before enforcing success.
+**Use:** freeze the successful production candidate as the release
+`operational-core-v1`.
 
-## 6. Daily APXMIDP grading V2
+This workflow evaluates exact D-7 fallbacks for demand and nuclear, selects them
+only when they beat the component model on the chronological holdout, rebuilds the
+matching uncertainty distribution and publishes a versioned release archive. The
+release remains marked `shadow_only`.
 
-**Use:** append public APXMIDP actual prices and grade immutable forecast logs.
+## 7. Shadow day-ahead forecast V1
 
-Runs daily at 09:30 UTC and resolves the previous delivery date in
-`Europe/London`. A manual date may also be supplied. Concurrency is restricted to
-one grading job to prevent overlapping repository pushes. Actuals and scores are
-uploaded as an artifact before they are committed.
+**Use:** generate tomorrow's probabilistic forecast without operational trading.
 
-## Required order before genuine forecasts
+The workflow runs at approximately 12:50 Europe/London, creates the correct
+46/48/50 settlement periods, retrieves current Open-Meteo forecasts over the full
+UTC settlement span, collects any exact D-7 Elexon fallback profile, runs the
+frozen release and appends forecasts to `live/forecasts.csv`. Every issue time and
+delivery period is immutable.
+
+## 8. Daily APXMIDP grading V3
+
+**Use:** collect the previous complete GB settlement day's APXMIDP actuals, grade
+all matching immutable forecasts, calculate timestamp-aligned D-1 persistence and
+update `live/deployment_gate.json`.
+
+The deployment gate requires:
+
+- at least 30 consecutive complete shadow delivery days;
+- every expected 46/48/50 settlement period;
+- all forecasts issued at least eight hours before delivery;
+- price MAE at least 5% better than persistence;
+- P10-P90 empirical coverage between 70% and 90%.
+
+Passing the gate means eligible for controlled human operational review. It does
+not authorise autonomous trading and is not financial advice.
+
+## 9. Collect ENTSO-E neighbours V3
+
+**Use:** diagnose or recollect ENTSO-E products independently using the
+`ENTSOE_TOKEN` repository secret.
+
+## Completion definition
+
+The `core_without_battery` engineering platform is technically complete when:
 
 1. CI is green.
-2. One-month validation is green.
-3. Core-model smoke test is green.
-4. Historical collection is completed and audited for at least 12 months,
-   preferably 24 months.
-5. A production training workflow is run with a multi-month chronological
-   holdout and the results are reviewed against persistence.
-6. Only then should a live day-ahead forecast workflow be enabled.
+2. Historical collection, production-candidate training and audits are green.
+3. The operational release publishes successfully.
+4. One manual shadow forecast succeeds and writes a complete immutable day.
+5. One grading run succeeds and writes actuals, scores and the deployment-gate
+   report.
 
-A green one-month smoke test proves the software pipeline, not forecast quality.
+The statistical deployment qualification is intentionally time-based. It cannot
+be truthfully declared complete until 30 real consecutive delivery days have been
+forecast and graded. Battery/B1610 classification is a separate `full` profile
+extension and must not be represented as complete without a verified BM-unit map.
