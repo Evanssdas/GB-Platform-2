@@ -191,6 +191,38 @@ def train_platform(
     return metrics
 
 
+def _operational_component_point_forecasts(
+    feature_frame: pd.DataFrame,
+    model_dir: Path,
+    metadata: dict,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    point = feature_frame.copy()
+    targets = metadata.get("component_targets", FULL_COMPONENT_TARGETS)
+    strategy = metadata.get("operational_component_strategy", {})
+    used: dict[str, str] = {}
+
+    for target in targets:
+        source = strategy.get(target, {}).get("source", "model")
+        if source == "fallback_d7":
+            fallback_column = f"fallback_d7_{target}"
+            if fallback_column not in point:
+                raise KeyError(
+                    f"Operational strategy requires missing column {fallback_column}"
+                )
+            values = pd.to_numeric(point[fallback_column], errors="coerce")
+            if values.isna().any():
+                raise ValueError(f"Operational fallback contains nulls: {fallback_column}")
+            point[target] = values.to_numpy(dtype=float)
+        elif source == "model":
+            model = TrainedRegressor.load(model_dir / f"{target}.joblib")
+            point[target] = model.predict(point)
+        else:
+            raise ValueError(f"Unsupported operational source for {target}: {source}")
+        used[target] = source
+        point[f"component_source_{target}"] = source
+    return point, used
+
+
 def forecast_platform(
     feature_frame: pd.DataFrame,
     model_dir: str | Path,
@@ -204,16 +236,15 @@ def forecast_platform(
     metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
     component_targets = metadata.get("component_targets", FULL_COMPONENT_TARGETS)
 
-    point = feature_frame.copy()
-    for target in component_targets:
-        model = TrainedRegressor.load(model_dir / f"{target}.joblib")
-        point[target] = model.predict(point)
-
+    point, component_sources = _operational_component_point_forecasts(
+        feature_frame, model_dir, metadata
+    )
     point = _add_stacked_balance_features(point)
     price_model = TrainedRegressor.load(model_dir / "price_gbp_mwh.joblib")
     point["price_point_gbp_mwh"] = price_model.predict(point)
 
-    errors = pd.read_parquet(model_dir / "historical_component_errors.parquet")
+    error_file = metadata.get("component_error_file", "historical_component_errors.parquet")
+    errors = pd.read_parquet(model_dir / error_file)
     component_scenarios = bootstrap_error_scenarios(
         point,
         errors,
@@ -239,6 +270,9 @@ def forecast_platform(
         result.price_paths,
     )
     report["model_profile"] = metadata.get("model_profile", "unknown")
+    report["operational_bundle_ready"] = bool(metadata.get("operational_bundle_ready"))
+    report["component_sources"] = component_sources
+    report["component_error_file"] = error_file
     report["risk"] = scenario_risk(
         result.price_paths,
         point["price_point_gbp_mwh"].to_numpy(),
