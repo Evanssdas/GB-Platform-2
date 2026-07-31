@@ -21,9 +21,8 @@ on:
         required: true
         default: "1000"
   schedule:
-    # One of these is 12:50 Europe/London throughout the year. The resolve step
-    # skips the other scheduled invocation.
-    - cron: "50 11,12 * * *"
+    - cron: "50 11 * * *"
+    - cron: "50 12 * * *"
 
 permissions:
   contents: write
@@ -54,6 +53,7 @@ jobs:
         env:
           MANUAL_DATE: ${{ inputs.delivery_date }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           python - <<'PY'
           import os
@@ -61,17 +61,27 @@ jobs:
           from zoneinfo import ZoneInfo
 
           now = datetime.now(timezone.utc)
-          local = now.astimezone(ZoneInfo("Europe/London"))
+          london = ZoneInfo("Europe/London")
+          local = now.astimezone(london)
           manual = os.environ.get("MANUAL_DATE", "").strip()
           proceed = True
-          if os.environ["EVENT_NAME"] == "schedule" and local.hour != 12:
-              proceed = False
+          if os.environ["EVENT_NAME"] == "schedule":
+              offset_hours = int(local.utcoffset().total_seconds() // 3600)
+              expected_utc_hour = 12 - offset_hours
+              scheduled_hour = int(os.environ.get("EVENT_SCHEDULE", "0 0 * * *").split()[1])
+              proceed = scheduled_hour == expected_utc_hour
           delivery = manual or (local.date() + timedelta(days=1)).isoformat()
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"proceed={str(proceed).lower()}\n")
               handle.write(f"delivery_date={delivery}\n")
               handle.write(f"issue_time_utc={now.isoformat()}\n")
-          print({"proceed": proceed, "delivery_date": delivery, "issue_time_utc": now.isoformat(), "local_time": local.isoformat()})
+          print({
+              "proceed": proceed,
+              "delivery_date": delivery,
+              "issue_time_utc": now.isoformat(),
+              "actual_local_time": local.isoformat(),
+              "event_schedule": os.environ.get("EVENT_SCHEDULE"),
+          })
           PY
 
       - name: Install and test
