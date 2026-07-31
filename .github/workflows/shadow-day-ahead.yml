@@ -1,4 +1,4 @@
-name: Shadow day-ahead forecast V2
+name: Shadow day-ahead forecast V3
 run-name: Shadow forecast ${{ inputs.delivery_date || 'next GB day' }}
 
 on:
@@ -144,6 +144,22 @@ jobs:
           --run-attempt "${{ github.run_attempt }}"
           --scenarios "${{ inputs.scenarios || '1000' }}"
 
+      - name: Register forecast in unified review logs
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          python -m gb_platform_v2.review_logs forecast
+          --logs-root logs
+          --daily-report outputs/shadow/forecast/daily_report.json
+          --feature-summary outputs/shadow/feature_summary.json
+          --price-forecast outputs/shadow/forecast/half_hourly_price_forecast.csv
+          --system-forecast outputs/shadow/forecast/half_hourly_system_forecast.csv
+          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          --delivery-date "${{ steps.dates.outputs.delivery_date }}"
+          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --scenarios "${{ inputs.scenarios || '1000' }}"
+
       - name: Validate shadow output
         if: steps.dates.outputs.proceed == 'true'
         shell: bash
@@ -157,6 +173,7 @@ jobs:
           forecast = pd.read_csv("outputs/shadow/forecast/half_hourly_price_forecast.csv")
           store = pd.read_csv("live/forecasts.csv")
           risk_log = pd.read_csv("live/risk_log.csv")
+          review = pd.read_csv("logs/daily_summary.csv")
           expected = int(features["expected_period_count"])
           if len(forecast) != expected:
               raise SystemExit(f"Forecast rows {len(forecast)} != expected {expected}")
@@ -174,31 +191,37 @@ jobs:
           ]
           if risk_rows.empty:
               raise SystemExit("Permanent risk log does not contain this delivery day")
+          review_rows = review.loc[review["delivery_date"].astype(str).eq(delivery)]
+          if review_rows.empty or review_rows["scenario_var_gbp"].isna().all():
+              raise SystemExit("Unified review log does not contain the forecast and VaR")
           report_path = Path(str(risk_rows.iloc[-1]["report_path"]))
           if not report_path.exists():
               raise SystemExit(f"Permanent daily report is missing: {report_path}")
+          if not Path("logs/README.md").exists():
+              raise SystemExit("Review-log dashboard is missing")
           print({
               "forecast_rows": len(forecast),
               "stored_rows_for_day": len(selected),
               "risk_log_rows_for_day": len(risk_rows),
+              "review_log_rows_for_day": len(review_rows),
               "daily_report": str(report_path),
               "delivery_date": delivery,
           })
           PY
 
-      - name: Commit immutable forecast and risk logs
+      - name: Commit immutable forecast risk and review logs
         if: steps.dates.outputs.proceed == 'true'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add live/forecasts.csv live/risk_log.csv live/reports
+          git add live/forecasts.csv live/risk_log.csv live/reports logs
           if ! git diff --cached --quiet; then
             git commit -m "Shadow forecast ${{ steps.dates.outputs.delivery_date }}"
             git pull --rebase origin main
             git push origin HEAD:main
           else
-            echo "No new immutable forecast or risk rows"
+            echo "No new immutable forecast risk or review rows"
           fi
 
       - name: Upload shadow forecast evidence
@@ -211,5 +234,6 @@ jobs:
             outputs/shadow
             live/risk_log.csv
             live/reports/${{ steps.dates.outputs.delivery_date }}
+            logs
           if-no-files-found: warn
           retention-days: 90
