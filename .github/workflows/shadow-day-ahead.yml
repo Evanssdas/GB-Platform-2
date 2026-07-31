@@ -1,0 +1,172 @@
+name: Shadow day-ahead forecast V1
+run-name: Shadow forecast ${{ inputs.delivery_date || 'next GB day' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      delivery_date:
+        description: Optional GB delivery date YYYY-MM-DD; blank means tomorrow
+        required: false
+        default: ""
+      release_tag:
+        description: Frozen operational model release
+        required: true
+        default: operational-core-v1
+      model_version:
+        description: Immutable model version
+        required: true
+        default: core-12m-operational-v1
+      scenarios:
+        description: Monte Carlo scenarios
+        required: true
+        default: "1000"
+  schedule:
+    # One of these is 12:50 Europe/London throughout the year. The resolve step
+    # skips the other scheduled invocation.
+    - cron: "50 11,12 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shadow-day-ahead
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Resolve issue and delivery times
+        id: dates
+        shell: bash
+        env:
+          MANUAL_DATE: ${{ inputs.delivery_date }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(timezone.utc)
+          local = now.astimezone(ZoneInfo("Europe/London"))
+          manual = os.environ.get("MANUAL_DATE", "").strip()
+          proceed = True
+          if os.environ["EVENT_NAME"] == "schedule" and local.hour != 12:
+              proceed = False
+          delivery = manual or (local.date() + timedelta(days=1)).isoformat()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"proceed={str(proceed).lower()}\n")
+              handle.write(f"delivery_date={delivery}\n")
+              handle.write(f"issue_time_utc={now.isoformat()}\n")
+          print({"proceed": proceed, "delivery_date": delivery, "issue_time_utc": now.isoformat(), "local_time": local.isoformat()})
+          PY
+
+      - name: Install and test
+        if: steps.dates.outputs.proceed == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Download frozen operational model release
+        if: steps.dates.outputs.proceed == 'true'
+        env:
+          TAG: ${{ inputs.release_tag || 'operational-core-v1' }}
+        run: |
+          mkdir -p operational_bundle
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern operational-core-v1.zip \
+            --dir operational_bundle
+          unzip -q operational_bundle/operational-core-v1.zip -d operational_bundle/unpacked
+          test -f operational_bundle/unpacked/models/metadata.json
+          test -f operational_bundle/unpacked/models/operational_component_errors.parquet
+
+      - name: Build leakage-safe tomorrow features
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          timeout 20m python -m gb_platform_v2.shadow_features
+          --delivery-date "${{ steps.dates.outputs.delivery_date }}"
+          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --config config/example.yaml
+          --models operational_bundle/unpacked/models
+          --output data/processed/shadow_features.parquet
+          --recent-dir data/parsed/shadow_recent
+          --summary outputs/shadow/feature_summary.json
+
+      - name: Run and immutably log shadow forecast
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          timeout 35m gb-v2 live-forecast
+          --input data/processed/shadow_features.parquet
+          --models operational_bundle/unpacked/models
+          --output outputs/shadow/forecast
+          --forecasts live/forecasts.csv
+          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --scenarios "${{ inputs.scenarios || '1000' }}"
+
+      - name: Validate shadow output
+        if: steps.dates.outputs.proceed == 'true'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          features = json.loads(Path("outputs/shadow/feature_summary.json").read_text())
+          forecast = pd.read_csv("outputs/shadow/forecast/half_hourly_price_forecast.csv")
+          store = pd.read_csv("live/forecasts.csv")
+          expected = int(features["expected_period_count"])
+          if len(forecast) != expected:
+              raise SystemExit(f"Forecast rows {len(forecast)} != expected {expected}")
+          version = "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          delivery = "${{ steps.dates.outputs.delivery_date }}"
+          selected = store.loc[
+              store["model_version"].astype(str).eq(version)
+              & pd.to_datetime(store["delivery_time_utc"], utc=True).dt.tz_convert("Europe/London").dt.date.astype(str).eq(delivery)
+          ]
+          if len(selected) < expected:
+              raise SystemExit("Immutable forecast store does not contain the complete delivery day")
+          print({"forecast_rows": len(forecast), "stored_rows_for_day": len(selected), "delivery_date": delivery})
+          PY
+
+      - name: Commit immutable shadow forecast log
+        if: steps.dates.outputs.proceed == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add live/forecasts.csv
+          if ! git diff --cached --quiet; then
+            git commit -m "Shadow forecast ${{ steps.dates.outputs.delivery_date }}"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          else
+            echo "No new immutable forecast rows"
+          fi
+
+      - name: Upload shadow forecast evidence
+        if: always() && steps.dates.outputs.proceed == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: shadow-forecast-${{ steps.dates.outputs.delivery_date }}-run-${{ github.run_id }}
+          path: |
+            data/processed/shadow_features.parquet
+            outputs/shadow
+          if-no-files-found: warn
+          retention-days: 90
