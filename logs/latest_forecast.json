@@ -1,0 +1,29 @@
+{
+  "workflow_revision": "review-forecast-v1-backfill",
+  "delivery_date": "2026-08-01",
+  "model_version": "core-12m-operational-v1",
+  "issue_time_utc": "2026-07-31T13:35:38Z",
+  "github_run_id": "30635063068",
+  "github_run_attempt": "1",
+  "monte_carlo_scenarios": 1000,
+  "period_count": 48,
+  "p50_daily_min_gbp_mwh": 20.00683022140521,
+  "p50_daily_mean_gbp_mwh": 64.25921931035937,
+  "p50_daily_max_gbp_mwh": 98.75531703739713,
+  "probability_any_negative_period": 0.001,
+  "risk_gbp": {
+    "scenario_var": 13446.297717317333,
+    "expected_shortfall": 15130.521627365843,
+    "worst_loss": 19437.836187362143,
+    "best_profit": 5761.391737364628
+  },
+  "component_sources": {
+    "demand_mw": "fallback_d7",
+    "embedded_wind_mw": "model",
+    "embedded_solar_mw": "model",
+    "transmission_wind_mw": "model",
+    "nuclear_mw": "fallback_d7",
+    "net_import_mw": "model",
+    "inertia_gvas": "model"
+  }
+}
