@@ -1,0 +1,154 @@
+name: Build report from existing shadow forecast V1
+run-name: Build market report for ${{ inputs.delivery_date }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      forecast_run_id:
+        description: Successful Shadow day-ahead forecast workflow run ID
+        required: true
+        default: "30635063068"
+      delivery_date:
+        description: GB delivery date YYYY-MM-DD
+        required: true
+        default: "2026-08-01"
+      model_version:
+        description: Immutable model version used by the forecast
+        required: true
+        default: core-12m-operational-v1
+      scenarios:
+        description: Monte Carlo scenarios used by the forecast
+        required: true
+        default: "1000"
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: build-existing-market-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Download existing shadow artifact
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.forecast_run_id }}
+          DELIVERY_DATE: ${{ inputs.delivery_date }}
+        run: |
+          ARTIFACT_NAME="shadow-forecast-${DELIVERY_DATE}-run-${RUN_ID}"
+          mkdir -p downloaded
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT_NAME" --dir downloaded
+          test -f downloaded/outputs/shadow/feature_summary.json
+          test -f downloaded/outputs/shadow/forecast/daily_report.json
+          test -f downloaded/outputs/shadow/forecast/half_hourly_price_forecast.csv
+          test -f downloaded/outputs/shadow/forecast/half_hourly_system_forecast.csv
+
+      - name: Read original issue time
+        id: issue
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          path = Path("downloaded/outputs/shadow/forecast/half_hourly_system_forecast.csv")
+          frame = pd.read_csv(path)
+          values = pd.to_datetime(frame["issue_time_utc"], utc=True).dropna().unique()
+          if len(values) != 1:
+              raise SystemExit(f"Expected exactly one issue time, found {len(values)}")
+          value = pd.Timestamp(values[0]).isoformat()
+          with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as handle:
+              handle.write(f"issue_time_utc={value}\n")
+          print(value)
+          PY
+
+      - name: Build full report from existing forecast
+        run: >-
+          python -m gb_platform_v2.market_report
+          --system-forecast downloaded/outputs/shadow/forecast/half_hourly_system_forecast.csv
+          --price-forecast downloaded/outputs/shadow/forecast/half_hourly_price_forecast.csv
+          --daily-report downloaded/outputs/shadow/forecast/daily_report.json
+          --feature-summary downloaded/outputs/shadow/feature_summary.json
+          --output-dir "logs/daily/${{ inputs.delivery_date }}/market-report-backfill-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+          --model-version "${{ inputs.model_version }}"
+          --delivery-date "${{ inputs.delivery_date }}"
+          --issue-time-utc "${{ steps.issue.outputs.issue_time_utc }}"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --scenarios "${{ inputs.scenarios }}"
+          --paper-capital-gbp 500000
+          --var-budget-fraction 0.02
+          --reference-position-mwh 100
+          --confidence-level 0.95
+
+      - name: Validate report files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path("logs/daily/${{ inputs.delivery_date }}/market-report-backfill-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}")
+          required = [
+              root / "report.md",
+              root / "report.json",
+              root / "half_hourly_system_and_price_table.csv",
+              root / "daily_system_summary.csv",
+              root / "var_and_position_limits.csv",
+              root / "plots/01_system_components.png",
+              root / "plots/02_residual_demand.png",
+              root / "plots/03_wind_solar_breakdown.png",
+              root / "plots/04_net_imports_and_inertia.png",
+              root / "plots/05_price_fan.png",
+              root / "plots/06_negative_price_probability.png",
+              root / "plots/07_risk_position_limits.png",
+          ]
+          missing = [str(path) for path in required if not path.exists()]
+          if missing:
+              raise SystemExit(f"Missing report files: {missing}")
+          limits = pd.read_csv(root / "var_and_position_limits.csv")
+          print(limits.to_string(index=False))
+          PY
+
+      - name: Commit backfilled report
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add logs
+          if ! git diff --cached --quiet; then
+            git commit -m "Backfill market report ${{ inputs.delivery_date }}"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Upload report evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: market-report-${{ inputs.delivery_date }}-run-${{ github.run_id }}
+          path: logs/daily/${{ inputs.delivery_date }}
+          if-no-files-found: error
+          retention-days: 90
