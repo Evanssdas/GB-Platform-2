@@ -69,6 +69,45 @@ def train_regressor(
     return TrainedRegressor(model, features, target, transform, scale)
 
 
+def _timestamp_series(frame: pd.DataFrame) -> pd.Series:
+    if "timestamp" in frame:
+        values = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    elif isinstance(frame.index, pd.DatetimeIndex):
+        values = pd.Series(pd.to_datetime(frame.index, utc=True), index=frame.index)
+    else:
+        raise KeyError("Timestamp-aware scoring requires a timestamp column or DatetimeIndex")
+    if values.isna().any():
+        raise ValueError("Timestamp-aware scoring found invalid timestamps")
+    return values
+
+
+def _daily_persistence_for_test(
+    clean: pd.DataFrame,
+    test: pd.DataFrame,
+    target: str,
+) -> pd.Series:
+    """Return the observed target at the exact UTC timestamp minus 24 hours.
+
+    This avoids row-shift errors when a settlement day is excluded or when GB DST
+    produces 46- or 50-period local settlement days. Rows without a genuine
+    timestamp-matched daily baseline remain missing and are excluded from the
+    baseline comparison rather than filled with an unrelated value.
+    """
+    clean_timestamps = _timestamp_series(clean)
+    history = pd.Series(
+        pd.to_numeric(clean[target], errors="coerce").to_numpy(),
+        index=pd.DatetimeIndex(clean_timestamps),
+        name="daily_persistence",
+    )
+    if history.index.duplicated().any():
+        raise ValueError("Timestamp-aware persistence requires unique timestamps")
+    test_timestamps = pd.DatetimeIndex(_timestamp_series(test))
+    prior_timestamps = test_timestamps - pd.Timedelta(hours=24)
+    baseline = history.reindex(prior_timestamps)
+    baseline.index = test.index
+    return baseline
+
+
 def chronological_holdout_score(
     frame: pd.DataFrame,
     features: list[str],
@@ -83,16 +122,24 @@ def chronological_holdout_score(
     train = clean.iloc[:-holdout_rows]
     test = clean.iloc[-holdout_rows:]
     fitted = train_regressor(train, features, target, transform, scale)
-    prediction = fitted.predict(test)
-    actual = test[target].to_numpy(dtype=float)
-    baseline = test[target].shift(48).fillna(train[target].iloc[-1]).to_numpy(dtype=float)
-    model_mae = mean_absolute_error(actual, prediction)
-    baseline_mae = mean_absolute_error(actual, baseline)
+    prediction = pd.Series(fitted.predict(test), index=test.index, dtype=float)
+    actual = pd.to_numeric(test[target], errors="coerce").astype(float)
+    baseline = _daily_persistence_for_test(clean, test, target)
+    comparable = baseline.notna() & actual.notna() & prediction.notna()
+    if not comparable.any():
+        raise ValueError(f"No timestamp-matched daily persistence rows for target {target}")
+    model_mae = mean_absolute_error(actual.loc[comparable], prediction.loc[comparable])
+    baseline_mae = mean_absolute_error(actual.loc[comparable], baseline.loc[comparable])
     return {
         "model_mae": float(model_mae),
         "baseline_mae": float(baseline_mae),
         "improvement_percent": float(100 * (baseline_mae - model_mae) / baseline_mae)
-        if baseline_mae else 0.0,
+        if baseline_mae
+        else 0.0,
+        "comparison_rows": int(comparable.sum()),
+        "holdout_rows": int(len(test)),
+        "baseline_missing_rows": int((~baseline.notna()).sum()),
+        "baseline_definition": "observed target at exact timestamp minus 24 hours",
     }
 
 
