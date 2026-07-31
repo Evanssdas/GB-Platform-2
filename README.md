@@ -166,7 +166,3 @@ The platform keeps the earlier simple VaR concept but fixes the negative-price w
 - worst simulated loss.
 
 All risk outputs are illustrative until calibrated to a real portfolio, contract shape and limits.
-
-## Interview-safe description
-
-> “V2 is a half-hourly probabilistic research platform rather than a daily peak-only model. It separates physical components, supports negative prices through arcsinh, includes embedded renewables, curtailment, nuclear availability, storage, interconnectors and inertia, and then propagates correlated uncertainty through the price model. The repository framework is implemented and tested; real market performance still depends on completing point-in-time backfills, training and live grading.”
