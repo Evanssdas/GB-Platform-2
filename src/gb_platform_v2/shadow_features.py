@@ -34,7 +34,8 @@ def _delivery_date(value: str | pd.Timestamp) -> pd.Timestamp:
 
 def _forecast_weather_site(
     site: dict,
-    delivery_date: pd.Timestamp,
+    api_start_date: str,
+    api_end_date: str,
 ) -> pd.DataFrame:
     client = JsonClient("https://api.open-meteo.com/v1", timeout=60, retries=4)
     payload = client.get(
@@ -43,8 +44,8 @@ def _forecast_weather_site(
             "latitude": float(site["latitude"]),
             "longitude": float(site["longitude"]),
             "hourly": ",".join(LIVE_WEATHER_VARIABLES),
-            "start_date": delivery_date.strftime("%Y-%m-%d"),
-            "end_date": delivery_date.strftime("%Y-%m-%d"),
+            "start_date": api_start_date,
+            "end_date": api_end_date,
             "timezone": "UTC",
         },
     )
@@ -60,11 +61,13 @@ def _weather_group(
     sites: list[dict],
     group: str,
     periods_utc: pd.DatetimeIndex,
-    delivery_date: pd.Timestamp,
 ) -> pd.DataFrame:
+    api_start = periods_utc.min().floor("D").strftime("%Y-%m-%d")
+    right_boundary = periods_utc.max() + pd.Timedelta(minutes=30)
+    api_end = right_boundary.floor("D").strftime("%Y-%m-%d")
     merged: pd.DataFrame | None = None
     for site in sites:
-        frame = _forecast_weather_site(site, delivery_date)
+        frame = _forecast_weather_site(site, api_start, api_end)
         merged = frame if merged is None else merged.merge(
             frame, on="timestamp", how="outer", validate="one_to_one"
         )
@@ -73,12 +76,10 @@ def _weather_group(
     merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True)
     merged = merged.set_index("timestamp").sort_index()
 
-    # A forecast day is hourly. Interpolate in UTC onto the exact GB settlement
-    # clock, including 46/50-period DST days. Add a right boundary only when the
-    # API omitted the next midnight.
-    right_boundary = periods_utc.max() + pd.Timedelta(minutes=30)
     if right_boundary not in merged.index:
-        tail = merged.tail(1).copy()
+        tail = merged.loc[:right_boundary].tail(1).copy()
+        if tail.empty:
+            raise ValueError(f"Live weather has no right boundary for {group}")
         tail.index = pd.DatetimeIndex([right_boundary])
         merged = pd.concat([merged, tail])
     union = merged.index.union(periods_utc).sort_values()
@@ -86,22 +87,22 @@ def _weather_group(
     if half_hourly.isna().any().any():
         missing = half_hourly.columns[half_hourly.isna().any()].tolist()
         raise ValueError(f"Live weather contains gaps for {group}: {missing}")
-    half_hourly = half_hourly.rename(
+    return half_hourly.rename(
         columns={column: f"weather_{group}_{column}" for column in half_hourly.columns}
     )
-    return half_hourly
 
 
 def _collect_d7_fallbacks(
-    delivery_date: pd.Timestamp,
     periods_utc: pd.DatetimeIndex,
     output_dir: Path,
 ) -> pd.DataFrame:
-    source_day = delivery_date - pd.Timedelta(days=7)
-    source_end = source_day + pd.Timedelta(days=1)
+    source_timestamps = periods_utc - pd.Timedelta(days=7)
+    source_local = source_timestamps.tz_convert(LONDON_TZ)
+    first_day = pd.Timestamp(source_local.min().date())
+    end_day = pd.Timestamp(source_local.max().date()) + pd.Timedelta(days=1)
     collect_elexon_core(
-        source_day.strftime("%Y-%m-%d"),
-        source_end.strftime("%Y-%m-%d"),
+        first_day.strftime("%Y-%m-%d"),
+        end_day.strftime("%Y-%m-%d"),
         output_dir,
         chunk_days=1,
     )
@@ -112,7 +113,6 @@ def _collect_d7_fallbacks(
     demand = demand.set_index("timestamp").sort_index()
     fuel = fuel.set_index("timestamp").sort_index()
 
-    source_timestamps = periods_utc - pd.Timedelta(days=7)
     fallback = pd.DataFrame(index=periods_utc)
     fallback["fallback_d7_demand_mw"] = demand["demand_mw"].reindex(
         source_timestamps
@@ -149,24 +149,24 @@ def build_shadow_features(
     if not metadata.get("operational_bundle_ready"):
         raise ValueError("Model bundle has not passed operational bundle preparation")
     settings = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
-    periods_local = settlement_periods_for_day(delivery)
-    periods_utc = periods_local.tz_convert("UTC")
+    periods_utc = settlement_periods_for_day(delivery).tz_convert("UTC")
 
     frame = pd.DataFrame(index=periods_utc)
     frame["timestamp"] = periods_utc
     for group in ("demand", "wind", "solar"):
-        weather = _weather_group(
-            settings["weather_sites"][group], group, periods_utc, delivery
+        frame = frame.join(
+            _weather_group(settings["weather_sites"][group], group, periods_utc),
+            how="left",
         )
-        frame = frame.join(weather, how="left")
 
     strategy = metadata["operational_component_strategy"]
     fallback_targets = {
         target for target, rule in strategy.items() if rule.get("source") == "fallback_d7"
     }
     if fallback_targets:
-        fallback = _collect_d7_fallbacks(delivery, periods_utc, Path(recent_dir))
-        frame = frame.join(fallback, how="left")
+        frame = frame.join(
+            _collect_d7_fallbacks(periods_utc, Path(recent_dir)), how="left"
+        )
 
     frame = add_cyclical_time_features(frame.reset_index(drop=True))
     frame = add_weather_features(frame)
@@ -191,7 +191,7 @@ def build_shadow_features(
     output.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(output, index=False)
     summary = {
-        "workflow_revision": "shadow-features-v1",
+        "workflow_revision": "shadow-features-v2",
         "delivery_date_local": delivery.strftime("%Y-%m-%d"),
         "issue_time_utc": issue.isoformat(),
         "period_count": int(len(frame)),
@@ -200,7 +200,7 @@ def build_shadow_features(
         "timestamp_max": periods_utc.max().isoformat(),
         "trained_feature_count": len(required_features),
         "fallback_targets": sorted(fallback_targets),
-        "weather_source": "Open-Meteo current forecast retrieved at workflow runtime",
+        "weather_source": "Open-Meteo current forecast retrieved over complete UTC settlement span",
         "fallback_source": "Elexon observed profile at exact UTC timestamp minus 168 hours",
         "leakage_gate": "passed",
     }
