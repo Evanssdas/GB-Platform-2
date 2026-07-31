@@ -61,13 +61,16 @@ def _append_new_rows(
     path: str | Path,
     key: list[str],
 ) -> pd.DataFrame:
-    """Append unseen keys and silently skip identical rerun keys."""
+    """Append unseen keys and silently skip already stored immutable keys."""
     existing = _read(path)
     incoming = _normalise_key_values(new_rows, key)
     if not existing.empty:
         existing = _normalise_key_values(existing, key)
         existing_keys = set(map(tuple, existing[key].itertuples(index=False, name=None)))
-        keep = [tuple(row) not in existing_keys for row in incoming[key].itertuples(index=False, name=None)]
+        keep = [
+            tuple(row) not in existing_keys
+            for row in incoming[key].itertuples(index=False, name=None)
+        ]
         incoming = incoming.loc[keep]
     if incoming.empty:
         return incoming
@@ -99,6 +102,17 @@ def append_actuals(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
     return _append_new_rows(out, path, ACTUAL_KEY)
 
 
+def _actual_persistence(actuals: pd.DataFrame, revision: str) -> pd.Series:
+    revision_rows = actuals.loc[actuals["actual_revision"].astype(str).eq(str(revision))].copy()
+    revision_rows = revision_rows.sort_values("delivery_time_utc").drop_duplicates(
+        "delivery_time_utc", keep="last"
+    )
+    lookup = revision_rows.set_index("delivery_time_utc")["actual_price"].astype(float)
+    source_times = revision_rows["delivery_time_utc"] - pd.Timedelta(days=1)
+    values = lookup.reindex(source_times).to_numpy()
+    return pd.Series(values, index=revision_rows["delivery_time_utc"].to_numpy())
+
+
 def grade_forecasts(
     forecasts_path: str | Path,
     actuals_path: str | Path,
@@ -108,19 +122,47 @@ def grade_forecasts(
     actuals = _read(actuals_path)
     if forecasts.empty or actuals.empty:
         return pd.DataFrame()
-    forecasts["delivery_time_utc"] = pd.to_datetime(forecasts["delivery_time_utc"], utc=True)
+    forecasts["delivery_time_utc"] = pd.to_datetime(
+        forecasts["delivery_time_utc"], utc=True
+    )
+    forecasts["issue_time_utc"] = pd.to_datetime(forecasts["issue_time_utc"], utc=True)
     actuals["delivery_time_utc"] = pd.to_datetime(actuals["delivery_time_utc"], utc=True)
+    actuals["actual_price"] = pd.to_numeric(actuals["actual_price"], errors="coerce")
+
+    persistence_parts: list[pd.DataFrame] = []
+    for revision in actuals["actual_revision"].astype(str).unique():
+        values = _actual_persistence(actuals, revision)
+        part = values.rename("persistence_price").reset_index()
+        part.columns = ["delivery_time_utc", "persistence_price"]
+        part["actual_revision"] = revision
+        persistence_parts.append(part)
+    persistence = pd.concat(persistence_parts, ignore_index=True) if persistence_parts else pd.DataFrame()
+
     joined = forecasts.merge(actuals, on="delivery_time_utc", how="inner")
+    if not persistence.empty:
+        joined = joined.merge(
+            persistence,
+            on=["delivery_time_utc", "actual_revision"],
+            how="left",
+            validate="many_to_one",
+        )
     required = {"forecast_id", "actual_revision", "p10", "p50", "p90", "actual_price"}
     missing = required - set(joined)
     if missing:
         raise KeyError(f"Cannot grade forecasts; missing columns: {sorted(missing)}")
 
+    persistence_price = joined.get(
+        "persistence_price", pd.Series(np.nan, index=joined.index)
+    )
     scores = pd.DataFrame(
         {
             "forecast_id": joined["forecast_id"],
+            "model_version": joined["model_version"].astype(str),
+            "issue_time_utc": joined["issue_time_utc"],
             "actual_revision": joined["actual_revision"].astype(str),
             "delivery_time_utc": joined["delivery_time_utc"],
+            "actual_price": joined["actual_price"],
+            "forecast_p50": joined["p50"],
             "error": joined["p50"] - joined["actual_price"],
             "absolute_error": (joined["p50"] - joined["actual_price"]).abs(),
             "squared_error": (joined["p50"] - joined["actual_price"]) ** 2,
@@ -130,6 +172,8 @@ def grade_forecasts(
                 "negative_probability",
                 pd.Series(np.nan, index=joined.index),
             ),
+            "persistence_price": persistence_price,
+            "persistence_absolute_error": (persistence_price - joined["actual_price"]).abs(),
             "graded_at_utc": pd.Timestamp.now(tz="UTC"),
         }
     )
