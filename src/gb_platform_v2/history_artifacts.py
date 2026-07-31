@@ -190,12 +190,61 @@ def _issue_time_for_delivery(timestamp: pd.Series, hour: int, minute: int) -> pd
     return issue_local.dt.tz_convert("UTC")
 
 
+def _validate_missing_embedded_seam_days(
+    missing: pd.DatetimeIndex,
+    artifacts: list[dict],
+) -> tuple[pd.DatetimeIndex, list[str]]:
+    """Allow only complete settlement days missing exactly at archive seams.
+
+    NESO annual archives can begin with revisions published after the configured
+    D-1 issue time. Those rows cannot be used without leakage. A complete missing
+    settlement day at a known artifact boundary is excluded from every training
+    source and recorded explicitly. Partial days or non-boundary gaps remain fatal.
+    """
+    if missing.empty:
+        return pd.DatetimeIndex([], tz="UTC"), []
+
+    seam_dates = {_date(item["start"]).date() for item in artifacts[1:]}
+    local_dates = pd.DatetimeIndex(missing).tz_convert("Europe/London").date
+    excluded_parts: list[pd.DatetimeIndex] = []
+    excluded_dates: list[str] = []
+
+    for day in sorted(set(local_dates)):
+        day_timestamp = pd.Timestamp(day)
+        day_end = day_timestamp + pd.Timedelta(days=1)
+        complete_day = _expected_half_hours(
+            day_timestamp.strftime("%Y-%m-%d"),
+            day_end.strftime("%Y-%m-%d"),
+        )
+        missing_for_day = missing.intersection(complete_day)
+        if day not in seam_dates:
+            raise ValueError(
+                "Point-in-time embedded forecasts are missing outside an archive seam: "
+                f"settlement_date={day}, rows={len(missing_for_day)}"
+            )
+        if len(missing_for_day) != len(complete_day):
+            raise ValueError(
+                "Point-in-time embedded forecasts have a partial settlement-day gap: "
+                f"settlement_date={day}, missing={len(missing_for_day)}, "
+                f"expected_day_rows={len(complete_day)}"
+            )
+        excluded_parts.append(complete_day)
+        excluded_dates.append(day_timestamp.strftime("%Y-%m-%d"))
+
+    excluded = excluded_parts[0]
+    for part in excluded_parts[1:]:
+        excluded = excluded.union(part)
+    if len(excluded) != len(missing) or len(missing.difference(excluded)):
+        raise ValueError("Embedded missing-row classification was incomplete")
+    return excluded.sort_values(), excluded_dates
+
+
 def _combine_embedded(
     artifacts: list[dict],
     expected: pd.DatetimeIndex,
     issue_hour: int,
     issue_minute: int,
-) -> tuple[pd.DataFrame, int]:
+) -> tuple[pd.DataFrame, int, pd.DatetimeIndex, list[str]]:
     frames = [
         _timestamp_frame(
             _read_parquet(item["root"] / "neso/embedded.parquet"),
@@ -226,14 +275,19 @@ def _combine_embedded(
     )
     actual = pd.DatetimeIndex(selected["timestamp"])
     missing = expected.difference(actual)
-    if len(selected) != len(expected) or len(missing):
+    excluded, excluded_dates = _validate_missing_embedded_seam_days(missing, artifacts)
+    training_expected = expected.difference(excluded)
+    remaining_missing = training_expected.difference(actual)
+    extra = actual.difference(training_expected)
+    if len(selected) != len(training_expected) or len(remaining_missing) or len(extra):
         raise ValueError(
-            "Point-in-time embedded forecasts do not cover the complete interval: "
-            f"rows={len(selected)}, expected={len(expected)}, missing={len(missing)}"
+            "Point-in-time embedded forecasts do not cover the leakage-safe training clock: "
+            f"rows={len(selected)}, expected={len(training_expected)}, "
+            f"missing={len(remaining_missing)}, extra={len(extra)}"
         )
     if (selected["published_at_utc"] > selected["selected_issue_time_utc"]).any():
         raise ValueError("Future embedded forecast revisions survived selection")
-    return selected, raw_rows
+    return selected, raw_rows, excluded, excluded_dates
 
 
 def _combine_weather(
@@ -265,9 +319,6 @@ def _combine_weather(
             if column != "timestamp"
         }
     )
-    # The hourly source interval is left-closed. Add one explicit right boundary
-    # using the last available hourly forecast so interpolation can provide the
-    # final half-hour without dropping a settlement period.
     boundary = combined.tail(1).copy()
     boundary["timestamp"] = end_utc
     combined = pd.concat([combined, boundary], ignore_index=True)
@@ -292,30 +343,33 @@ def prepare_historical_artifacts(
 
     The output layout matches ``config/data_mapping_core.yaml``. Embedded
     forecasts are reduced to the latest revision available by the configured D-1
-    issue time. Weather columns are namespaced before dataset assembly.
+    issue time. Complete unavailable settlement days at annual archive seams are
+    excluded from every half-hourly source rather than filled with future data.
     """
     if not (0 <= issue_hour <= 23 and 0 <= issue_minute <= 59):
         raise ValueError("Invalid issue time")
     artifacts = _ordered_artifacts(roots, expected_start, expected_end)
     output = Path(output_root)
-    expected_half_hours = _expected_half_hours(expected_start, expected_end)
+    full_expected_half_hours = _expected_half_hours(expected_start, expected_end)
     expected_hours = _expected_hours(expected_start, expected_end)
     end_utc = _settlement_boundary_utc(expected_end)
+
+    embedded, embedded_raw_rows, excluded, excluded_dates = _combine_embedded(
+        artifacts,
+        full_expected_half_hours,
+        issue_hour,
+        issue_minute,
+    )
+    training_expected_half_hours = full_expected_half_hours.difference(excluded)
 
     source_rows: dict[str, int] = {}
     for relative_path in HALF_HOURLY_SOURCES:
         frame = _combine_unique_half_hourly(
-            artifacts, relative_path, expected_half_hours
+            artifacts, relative_path, training_expected_half_hours
         )
         _write_frame(frame, output / relative_path)
         source_rows[relative_path] = len(frame)
 
-    embedded, embedded_raw_rows = _combine_embedded(
-        artifacts,
-        expected_half_hours,
-        issue_hour,
-        issue_minute,
-    )
     _write_frame(embedded, output / "neso/embedded.parquet")
     source_rows["neso/embedded.parquet"] = len(embedded)
 
@@ -331,7 +385,7 @@ def prepare_historical_artifacts(
             ignore_index=True,
         )
         entsoe = (
-            entsoe.loc[entsoe["timestamp"].isin(expected_half_hours)]
+            entsoe.loc[entsoe["timestamp"].isin(training_expected_half_hours)]
             .drop_duplicates("timestamp", keep="last")
             .sort_values("timestamp")
             .reset_index(drop=True)
@@ -340,12 +394,13 @@ def prepare_historical_artifacts(
         source_rows["entsoe/neighbour_prices.parquet"] = len(entsoe)
 
     summary = {
-        "workflow_revision": "history-artifact-merge-v1",
+        "workflow_revision": "history-artifact-merge-v2",
         "expected_start_date_inclusive": expected_start,
         "expected_end_date_exclusive": expected_end,
-        "settlement_start_utc": expected_half_hours.min().isoformat(),
+        "settlement_start_utc": full_expected_half_hours.min().isoformat(),
         "settlement_end_utc_exclusive": end_utc.isoformat(),
-        "expected_half_hour_rows": len(expected_half_hours),
+        "full_calendar_half_hour_rows": len(full_expected_half_hours),
+        "training_half_hour_rows": len(training_expected_half_hours),
         "expected_hour_rows": len(expected_hours),
         "artifact_run_ids": [
             str(item["context"].get("run_id", "unknown")) for item in artifacts
@@ -356,6 +411,15 @@ def prepare_historical_artifacts(
         "issue_time_local": f"{issue_hour:02d}:{issue_minute:02d}",
         "embedded_raw_revision_rows": embedded_raw_rows,
         "embedded_selected_rows": len(embedded),
+        "excluded_settlement_dates_local": excluded_dates,
+        "excluded_half_hour_rows": len(excluded),
+        "exclusion_reason": (
+            "No embedded forecast revision existed by the configured D-1 issue time "
+            "at an annual NESO archive seam; the complete settlement day was removed "
+            "from every training source to prevent leakage."
+            if excluded_dates
+            else None
+        ),
         "weather_boundary_policy": "carry final hourly forecast to exclusive end boundary",
         "source_rows": source_rows,
     }
