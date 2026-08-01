@@ -37,6 +37,12 @@ jobs:
     timeout-minutes: 75
     env:
       GH_TOKEN: ${{ github.token }}
+      MPLBACKEND: Agg
+      PYTHONFAULTHANDLER: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -109,15 +115,39 @@ jobs:
 
       - name: Run and immutably log shadow forecast
         if: steps.dates.outputs.proceed == 'true'
-        run: >-
-          timeout 35m gb-v2 live-forecast
-          --input data/processed/shadow_features.parquet
-          --models operational_bundle/unpacked/models
-          --output outputs/shadow/forecast
-          --forecasts live/forecasts.csv
-          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
-          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
-          --scenarios "${{ inputs.scenarios || '1000' }}"
+        shell: bash
+        env:
+          MODEL_VERSION: ${{ inputs.model_version || 'core-12m-operational-v1' }}
+          ISSUE_TIME_UTC: ${{ steps.dates.outputs.issue_time_utc }}
+          SCENARIOS: ${{ inputs.scenarios || '1000' }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p outputs/shadow
+          rm -rf outputs/shadow/forecast
+
+          run_forecast() {
+            timeout 40m python -m gb_platform_v2.cli live-forecast \
+              --input data/processed/shadow_features.parquet \
+              --models operational_bundle/unpacked/models \
+              --output outputs/shadow/forecast \
+              --forecasts live/forecasts.csv \
+              --model-version "$MODEL_VERSION" \
+              --issue-time-utc "$ISSUE_TIME_UTC" \
+              --scenarios "$SCENARIOS"
+          }
+
+          if ! run_forecast 2>&1 | tee outputs/shadow/live_forecast.log; then
+            echo "::warning::Shadow forecast attempt failed; cleaning outputs and retrying once."
+            rm -rf outputs/shadow/forecast
+            sleep 5
+            run_forecast 2>&1 | tee -a outputs/shadow/live_forecast.log
+          fi
+
+          test -s outputs/shadow/forecast/half_hourly_price_forecast.csv
+          test -s outputs/shadow/forecast/half_hourly_system_forecast.csv
+          test -s outputs/shadow/forecast/daily_report.json
+          test -s outputs/shadow/forecast/price_fan_chart.png
+          test -s live/forecasts.csv
 
       - name: Publish permanent daily VaR and risk report
         if: steps.dates.outputs.proceed == 'true'
