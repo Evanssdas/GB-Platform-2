@@ -102,7 +102,8 @@ def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
         )
         if duplicate_day.any():
             raise ValueError(
-                "Refusing a second forecast for the same model version and GB delivery day: "
+                "Refusing to overwrite an existing forecast for the same model version "
+                "and GB delivery day: "
                 f"model_version={versions[0]}, delivery_date={delivery_days[0]}"
             )
 
