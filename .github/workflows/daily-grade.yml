@@ -1,4 +1,4 @@
-name: Daily APXMIDP grading V4
+name: Daily APXMIDP grading V5
 run-name: Grade APXMIDP ${{ inputs.delivery_date || 'previous GB day' }}
 
 on:
@@ -41,7 +41,7 @@ jobs:
           pip install -e ".[dev]"
           pytest -q
 
-      - name: Resolve GB delivery window
+      - name: Resolve GB delivery and persistence windows
         id: dates
         shell: bash
         env:
@@ -53,20 +53,24 @@ jobs:
           else
             DAY=$(date -d 'yesterday' +%F)
           fi
-          END=$(python - "$DAY" <<'PY'
+          read -r START END <<EOF
+          $(python - "$DAY" <<'PY'
           import sys
           from datetime import date, timedelta
-          print(date.fromisoformat(sys.argv[1]) + timedelta(days=1))
+          day = date.fromisoformat(sys.argv[1])
+          print(day - timedelta(days=1), day + timedelta(days=1))
           PY
           )
+          EOF
           echo "day=$DAY" >> "$GITHUB_OUTPUT"
+          echo "start=$START" >> "$GITHUB_OUTPUT"
           echo "end=$END" >> "$GITHUB_OUTPUT"
-          echo "Grading GB settlement date $DAY using [$DAY, $END)"
+          echo "Grading GB settlement date $DAY and collecting persistence source window [$START, $END)"
 
-      - name: Collect complete GB settlement-day actual prices
+      - name: Collect target and prior-day actual prices
         run: >-
           timeout 10m gb-v2 collect-actuals
-          --start "${{ steps.dates.outputs.day }}"
+          --start "${{ steps.dates.outputs.start }}"
           --end "${{ steps.dates.outputs.end }}"
           --actuals live/actuals.csv
           --revision initial
@@ -110,7 +114,7 @@ jobs:
           --run-attempt "${{ github.run_attempt }}"
           --actual-revision initial
 
-      - name: Validate immutable output files and review logs
+      - name: Validate immutable output files and fair persistence comparison
         shell: bash
         run: |
           python - <<'PY'
@@ -132,10 +136,19 @@ jobs:
               raise SystemExit("Unified review log does not contain the graded delivery date")
           if not Path("logs/README.md").exists():
               raise SystemExit("Review-log dashboard is missing")
+
+          metrics = gate.get("metrics", {})
+          graded = int(metrics.get("graded_periods") or 0)
+          comparable = int(metrics.get("comparable_persistence_periods") or 0)
+          if graded and comparable != graded:
+              print(f"::warning::Persistence comparison covers {comparable}/{graded} periods; MAE gate remains provisional.")
+
           print({
               "actual_rows": len(frame),
               "deployment_ready": gate["deployment_ready"],
               "gate_mode": gate["mode"],
+              "graded_periods": graded,
+              "comparable_persistence_periods": comparable,
               "review_rows_for_day": len(review_rows),
           })
           scores = Path("live/scores.csv")
