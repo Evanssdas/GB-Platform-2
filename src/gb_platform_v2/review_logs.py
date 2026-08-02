@@ -69,7 +69,10 @@ def _write_json(path: Path, payload: dict[str, Any], *, immutable: bool = False)
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+    # Review CSVs are sparse, mixed-type tables. Reading every column as object
+    # prevents pandas from inferring an all-empty identifier column as float64,
+    # which would reject later string IDs under strict setitem rules.
+    return pd.read_csv(path, dtype=object) if path.exists() else pd.DataFrame()
 
 
 def _normalise_date(value: str | pd.Timestamp) -> str:
