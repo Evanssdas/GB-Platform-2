@@ -1,4 +1,4 @@
-name: Shadow day-ahead forecast V4
+name: Shadow day-ahead forecast V5
 run-name: Shadow forecast ${{ inputs.delivery_date || 'next GB day' }}
 
 on:
@@ -164,23 +164,7 @@ jobs:
           --run-attempt "${{ github.run_attempt }}"
           --scenarios "${{ inputs.scenarios || '1000' }}"
 
-      - name: Register forecast in unified review logs
-        if: steps.dates.outputs.proceed == 'true'
-        run: >-
-          python -m gb_platform_v2.review_logs forecast
-          --logs-root logs
-          --daily-report outputs/shadow/forecast/daily_report.json
-          --feature-summary outputs/shadow/feature_summary.json
-          --price-forecast outputs/shadow/forecast/half_hourly_price_forecast.csv
-          --system-forecast outputs/shadow/forecast/half_hourly_system_forecast.csv
-          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
-          --delivery-date "${{ steps.dates.outputs.delivery_date }}"
-          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
-          --run-id "${{ github.run_id }}"
-          --run-attempt "${{ github.run_attempt }}"
-          --scenarios "${{ inputs.scenarios || '1000' }}"
-
-      - name: Build full market report
+      - name: Build full half-hourly market report and plots
         if: steps.dates.outputs.proceed == 'true'
         run: >-
           python -m gb_platform_v2.market_report
@@ -200,6 +184,107 @@ jobs:
           --reference-position-mwh 100
           --confidence-level 0.95
 
+      - name: Publish easy-view daily dashboard and 30-minute table
+        if: steps.dates.outputs.proceed == 'true'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          delivery = "${{ steps.dates.outputs.delivery_date }}"
+          run_id = "${{ github.run_id }}"
+          attempt = "${{ github.run_attempt }}"
+          report_name = f"market-report-run-{run_id}-attempt-{attempt}"
+          day_root = Path("logs/daily") / delivery
+          root = day_root / report_name
+          table = pd.read_csv(root / "half_hourly_system_and_price_table.csv")
+
+          visible_columns = [
+              "settlement_period",
+              "gb_time",
+              "demand_mw",
+              "total_wind_mw",
+              "solar_mw",
+              "price_p10_gbp_mwh",
+              "price_p50_gbp_mwh",
+              "price_p90_gbp_mwh",
+              "negative_price_probability",
+          ]
+          visible = table[visible_columns].copy()
+          visible["negative_price_probability"] = (
+              pd.to_numeric(visible["negative_price_probability"], errors="coerce") * 100.0
+          )
+          visible = visible.rename(
+              columns={
+                  "settlement_period": "SP",
+                  "gb_time": "GB time",
+                  "demand_mw": "Demand MW",
+                  "total_wind_mw": "Wind MW",
+                  "solar_mw": "Solar MW",
+                  "price_p10_gbp_mwh": "Price P10 GBP/MWh",
+                  "price_p50_gbp_mwh": "Price P50 GBP/MWh",
+                  "price_p90_gbp_mwh": "Price P90 GBP/MWh",
+                  "negative_price_probability": "Negative price probability %",
+              }
+          )
+
+          def markdown_table(frame: pd.DataFrame) -> str:
+              headers = [str(column) for column in frame.columns]
+              lines = [
+                  "| " + " | ".join(headers) + " |",
+                  "|" + "|".join("---:" if column not in {"GB time"} else "---" for column in headers) + "|",
+              ]
+              for _, row in frame.iterrows():
+                  values = []
+                  for column in headers:
+                      value = row[column]
+                      if pd.isna(value):
+                          values.append("—")
+                      elif isinstance(value, float):
+                          values.append(f"{value:,.2f}")
+                      else:
+                          values.append(str(value))
+                  lines.append("| " + " | ".join(values) + " |")
+              return "\n".join(lines)
+
+          report_path = root / "report.md"
+          report_text = report_path.read_text(encoding="utf-8")
+          report_text += (
+              "\n\n## Complete 30-minute forecast table\n\n"
+              "Each row is one GB settlement period. Normal days contain 48 rows; "
+              "clock-change days contain 46 or 50 rows.\n\n"
+              + markdown_table(visible)
+              + "\n"
+          )
+          report_path.write_text(report_text, encoding="utf-8")
+
+          dashboard = [
+              f"# GB half-hourly market dashboard — {delivery}",
+              "",
+              f"[Open the complete report]({report_name}/report.md)",
+              "",
+              "Every line and marker below represents a 30-minute settlement-period forecast.",
+              "",
+              "## Demand, wind, solar and nuclear",
+              "",
+              f"![System components]({report_name}/plots/01_system_components.png)",
+              "",
+              f"![Wind and solar]({report_name}/plots/03_wind_solar_breakdown.png)",
+              "",
+              "## Half-hourly price probabilities",
+              "",
+              f"![P10 P50 P90 price fan]({report_name}/plots/05_price_fan.png)",
+              "",
+              f"![Negative-price probability]({report_name}/plots/06_negative_price_probability.png)",
+              "",
+              f"[Open the complete 30-minute CSV table]({report_name}/half_hourly_system_and_price_table.csv)",
+              "",
+          ]
+          (day_root / "README.md").write_text("\n".join(dashboard), encoding="utf-8")
+          print({"dashboard": str(day_root / "README.md"), "settlement_periods": len(visible)})
+          PY
+
       - name: Validate complete report
         if: steps.dates.outputs.proceed == 'true'
         shell: bash
@@ -211,6 +296,7 @@ jobs:
           delivery = "${{ steps.dates.outputs.delivery_date }}"
           root = Path(f"logs/daily/{delivery}/market-report-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}")
           required = [
+              Path(f"logs/daily/{delivery}/README.md"),
               root / "report.md",
               root / "report.json",
               root / "half_hourly_system_and_price_table.csv",
@@ -227,12 +313,34 @@ jobs:
           missing = [str(path) for path in required if not path.exists()]
           if missing:
               raise SystemExit(f"Complete market report is missing files: {missing}")
+          half_hourly = pd.read_csv(root / "half_hourly_system_and_price_table.csv")
+          expected = int(__import__("json").loads(Path("outputs/shadow/feature_summary.json").read_text())["expected_period_count"])
+          if len(half_hourly) != expected:
+              raise SystemExit(f"Expected {expected} settlement periods but found {len(half_hourly)}")
           limits = pd.read_csv(root / "var_and_position_limits.csv")
           binding = limits.loc[limits["metric"].eq("Binding maximum permissible volume"), "value"]
           if binding.empty or float(binding.iloc[0]) <= 0:
               raise SystemExit("Maximum permissible volume was not calculated")
-          print({"report": str(root / "report.md"), "binding_maximum_volume_mwh": float(binding.iloc[0])})
+          print({"report": str(root / "report.md"), "periods": len(half_hourly), "binding_maximum_volume_mwh": float(binding.iloc[0])})
           PY
+
+      - name: Register forecast in unified review logs
+        id: review_logs
+        continue-on-error: true
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          python -m gb_platform_v2.review_logs forecast
+          --logs-root logs
+          --daily-report outputs/shadow/forecast/daily_report.json
+          --feature-summary outputs/shadow/feature_summary.json
+          --price-forecast outputs/shadow/forecast/half_hourly_price_forecast.csv
+          --system-forecast outputs/shadow/forecast/half_hourly_system_forecast.csv
+          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          --delivery-date "${{ steps.dates.outputs.delivery_date }}"
+          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --scenarios "${{ inputs.scenarios || '1000' }}"
 
       - name: Commit forecast risk review and market reports
         if: steps.dates.outputs.proceed == 'true'
@@ -242,10 +350,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add live/forecasts.csv live/risk_log.csv live/reports logs
           if ! git diff --cached --quiet; then
-            git commit -m "Shadow forecast and market report ${{ steps.dates.outputs.delivery_date }}"
+            git commit -m "Shadow forecast and half-hourly market report ${{ steps.dates.outputs.delivery_date }}"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
+
+      - name: Enforce review-log health after preserving report
+        if: steps.dates.outputs.proceed == 'true' && steps.review_logs.outcome == 'failure'
+        run: |
+          echo "The forecast and plots were preserved, but review-log registration failed."
+          exit 1
 
       - name: Upload forecast and market-report evidence
         if: always() && steps.dates.outputs.proceed == 'true'
