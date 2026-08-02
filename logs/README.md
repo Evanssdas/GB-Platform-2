@@ -4,14 +4,20 @@ This folder is the human-readable review layer. The append-only files under `liv
 
 ## Current deployment gate
 
-No deployment-gate snapshot has been registered yet.
+- **Mode:** `shadow_only`
+- **Deployment ready:** `False`
+- **Graded days:** 1 / 30
+- **Model MAE:** 54.72 GBP/MWh
+- **Persistence MAE:** 10.92 GBP/MWh
+- **Improvement:** -401.06%
+- **P10–P90 coverage:** 0.146
 
 ## Latest daily results
 
 | Delivery date | P50 mean | VaR | Expected shortfall | Model MAE | Persistence MAE | Improvement | Coverage |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | 2026-08-03 | 73.59 | 20,313.97 | 22,333.77 | — | — | — | — |
-| 2026-08-01 | 64.26 | 13,446.30 | 15,130.52 | — | — | — | — |
+| 2026-08-01 | 64.26 | 13,446.30 | 15,130.52 | 49.83 | 10.92 | -356.28% | 0.146 |
 
 ## Files
 
@@ -24,4 +30,4 @@ No deployment-gate snapshot has been registered yet.
 - [`daily/`](daily): permanent detailed JSON records grouped by delivery date.
 
 Registered forecast runs: **2**  
-Registered grading runs: **0**
+Registered grading runs: **1**
