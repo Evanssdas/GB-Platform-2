@@ -24,6 +24,47 @@ def _load_feature_frame(path: str | Path) -> pd.DataFrame:
     return add_weather_features(frame)
 
 
+def _existing_forecast_covers_delivery_day(
+    forecasts_path: str | Path,
+    model_version: str,
+    delivery_times: pd.Series,
+) -> bool:
+    """Return whether an immutable stored forecast exactly covers these periods."""
+    path = Path(forecasts_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+
+    expected = pd.DatetimeIndex(pd.to_datetime(delivery_times, utc=True)).sort_values()
+    expected_days = expected.tz_convert("Europe/London").date
+    if len(set(expected_days)) != 1:
+        raise ValueError("A repair run must contain exactly one GB delivery day")
+    delivery_day = expected_days[0]
+
+    existing = pd.read_csv(path)
+    required = {"model_version", "delivery_time_utc"}
+    missing = required - set(existing)
+    if missing:
+        raise KeyError(f"Existing forecast log is missing columns: {sorted(missing)}")
+    existing["delivery_time_utc"] = pd.to_datetime(
+        existing["delivery_time_utc"], utc=True, errors="raise"
+    )
+    existing_days = existing["delivery_time_utc"].dt.tz_convert("Europe/London").dt.date
+    selected = existing.loc[
+        existing["model_version"].astype(str).eq(str(model_version))
+        & existing_days.eq(delivery_day)
+    ].copy()
+    if selected.empty:
+        return False
+
+    stored = pd.DatetimeIndex(selected["delivery_time_utc"]).sort_values()
+    if not stored.equals(expected):
+        raise ValueError(
+            "Existing immutable forecast does not exactly cover the repair run's "
+            f"delivery periods: model_version={model_version}, delivery_date={delivery_day}"
+        )
+    return True
+
+
 def run_and_log_forecast(
     feature_path: str | Path,
     model_dir: str | Path,
@@ -32,8 +73,15 @@ def run_and_log_forecast(
     model_version: str,
     issue_time_utc: str | pd.Timestamp,
     scenarios: int = 1000,
+    reuse_existing_day: bool = False,
 ) -> dict:
-    """Run the frozen model and append immutable probabilistic forecasts."""
+    """Run the frozen model and append immutable probabilistic forecasts.
+
+    When ``reuse_existing_day`` is enabled, a complete immutable forecast that
+    already covers the same model and GB delivery day is preserved rather than
+    appended again. This mode is intended only for rebuilding missing reports
+    and plots after a partially failed workflow run.
+    """
     features = _load_feature_frame(feature_path)
     report = forecast_platform(features, model_dir, output_dir, scenarios)
     price_path = Path(output_dir) / "half_hourly_price_forecast.csv"
@@ -46,21 +94,37 @@ def run_and_log_forecast(
     if (prices["delivery_time_utc"] <= issue).any():
         raise ValueError("Forecast delivery periods must all be later than issue time")
     prices["issue_time_utc"] = issue
-    append_forecasts(
-        prices[
-            [
-                "model_version",
-                "issue_time_utc",
-                "delivery_time_utc",
-                "p10",
-                "p50",
-                "p90",
-                "point",
-                "negative_probability",
-            ]
-        ],
-        forecasts_path,
-    )
+
+    reused = False
+    if reuse_existing_day:
+        reused = _existing_forecast_covers_delivery_day(
+            forecasts_path,
+            model_version,
+            prices["delivery_time_utc"],
+        )
+
+    if not reused:
+        append_forecasts(
+            prices[
+                [
+                    "model_version",
+                    "issue_time_utc",
+                    "delivery_time_utc",
+                    "p10",
+                    "p50",
+                    "p90",
+                    "point",
+                    "negative_probability",
+                ]
+            ],
+            forecasts_path,
+        )
+
+    if isinstance(report, dict):
+        report = dict(report)
+        report["forecast_log_status"] = (
+            "reused_existing_immutable_day" if reused else "appended_new_immutable_day"
+        )
     return report
 
 
