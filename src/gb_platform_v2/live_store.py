@@ -82,32 +82,88 @@ def _append_new_rows(
     return incoming
 
 
+def _scalar_values_equal(left: object, right: object, column: str) -> bool:
+    """Compare a CSV-loaded scalar with a freshly computed scalar."""
+    left_missing = pd.isna(left)
+    right_missing = pd.isna(right)
+    if bool(left_missing) or bool(right_missing):
+        return bool(left_missing) and bool(right_missing)
+
+    if column.endswith("_utc") and column != "graded_at_utc":
+        return pd.to_datetime(left, utc=True, errors="raise") == pd.to_datetime(
+            right, utc=True, errors="raise"
+        )
+
+    left_bool = str(left).strip().lower()
+    right_bool = str(right).strip().lower()
+    if left_bool in {"true", "false"} and right_bool in {"true", "false"}:
+        return left_bool == right_bool
+
+    try:
+        return bool(np.isclose(float(left), float(right), equal_nan=True))
+    except (TypeError, ValueError):
+        return str(left) == str(right)
+
+
 def _upsert_derived_rows(
     rows: pd.DataFrame,
     path: str | Path,
     key: list[str],
 ) -> pd.DataFrame:
-    """Replace derived rows with the latest deterministic recomputation."""
+    """Write only new or materially changed deterministic derived rows.
+
+    ``graded_at_utc`` is intentionally excluded from change detection. Therefore
+    an identical grading rerun is a no-op, while a later persistence value or
+    revised actual causes the affected score row to be replaced.
+    """
     missing = [column for column in key if column not in rows]
     if missing:
         raise KeyError(f"Missing derived key columns: {missing}")
 
     incoming = _normalise_key_values(rows, key)
     existing = _read(path)
-    if not existing.empty:
-        existing = _normalise_key_values(existing, key)
-        incoming_keys = set(map(tuple, incoming[key].itertuples(index=False, name=None)))
-        keep = [
-            tuple(row) not in incoming_keys
-            for row in existing[key].itertuples(index=False, name=None)
-        ]
-        existing = existing.loc[keep]
+    if existing.empty:
+        file = Path(path)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        incoming.to_csv(file, index=False)
+        return incoming
 
-    combined = pd.concat([existing, incoming], ignore_index=True)
+    existing = _normalise_key_values(existing, key)
+    existing_by_key = {
+        tuple(row[column] for column in key): row
+        for _, row in existing.iterrows()
+    }
+    comparison_columns = [column for column in incoming.columns if column != "graded_at_utc"]
+
+    changed_mask: list[bool] = []
+    for _, row in incoming.iterrows():
+        row_key = tuple(row[column] for column in key)
+        previous = existing_by_key.get(row_key)
+        changed = previous is None
+        if previous is not None:
+            changed = any(
+                column not in previous.index
+                or not _scalar_values_equal(previous[column], row[column], column)
+                for column in comparison_columns
+            )
+        changed_mask.append(changed)
+
+    changed_rows = incoming.loc[changed_mask].copy()
+    if changed_rows.empty:
+        return changed_rows
+
+    changed_keys = set(
+        map(tuple, changed_rows[key].itertuples(index=False, name=None))
+    )
+    keep_existing = [
+        tuple(row) not in changed_keys
+        for row in existing[key].itertuples(index=False, name=None)
+    ]
+    combined = pd.concat([existing.loc[keep_existing], changed_rows], ignore_index=True)
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(file, index=False)
-    return incoming
+    return changed_rows
 
 
 def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
