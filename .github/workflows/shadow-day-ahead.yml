@@ -1,4 +1,4 @@
-name: Shadow day-ahead forecast V7
+name: Shadow day-ahead forecast V8
 run-name: Shadow forecast ${{ inputs.delivery_date || 'next GB day' }}
 
 on:
@@ -83,63 +83,20 @@ jobs:
           print({"proceed": proceed, "delivery_date": delivery, "issue_time_utc": now.isoformat()})
           PY
 
-      - name: Detect already completed daily archive
+      - name: Detect completed archive without project dependencies
         id: archive
         if: steps.dates.outputs.proceed == 'true'
         shell: bash
-        env:
-          DELIVERY_DATE: ${{ steps.dates.outputs.delivery_date }}
-          MODEL_VERSION: ${{ inputs.model_version || 'core-12m-operational-v1' }}
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          import pandas as pd
+        run: >-
+          python scripts/check_daily_archive.py
+          --delivery-date "${{ steps.dates.outputs.delivery_date }}"
+          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
+          --forecasts live/forecasts.csv
+          --logs-root logs
+          --requested-issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --github-output "$GITHUB_OUTPUT"
 
-          delivery = os.environ["DELIVERY_DATE"]
-          model = os.environ["MODEL_VERSION"]
-          dashboard = Path("logs/daily") / delivery / "README.md"
-          complete_report = False
-          if dashboard.exists():
-              text = dashboard.read_text(encoding="utf-8")
-              complete_report = (
-                  "plots/01_system_components.png" in text
-                  and "plots/05_price_fan.png" in text
-                  and "half_hourly_system_and_price_table.csv" in text
-              )
-
-          complete_forecast = False
-          forecast_path = Path("live/forecasts.csv")
-          periods = 0
-          if forecast_path.exists() and forecast_path.stat().st_size:
-              frame = pd.read_csv(forecast_path)
-              frame["delivery_time_utc"] = pd.to_datetime(frame["delivery_time_utc"], utc=True)
-              local_day = frame["delivery_time_utc"].dt.tz_convert("Europe/London").dt.date.astype(str)
-              selected = frame.loc[
-                  frame["model_version"].astype(str).eq(model) & local_day.eq(delivery)
-              ]
-              periods = len(selected)
-              if periods:
-                  start = pd.Timestamp(delivery).tz_localize("Europe/London").tz_convert("UTC")
-                  end = (pd.Timestamp(delivery) + pd.Timedelta(days=1)).tz_localize("Europe/London").tz_convert("UTC")
-                  expected = len(pd.date_range(start, end, freq="30min", inclusive="left"))
-                  complete_forecast = periods == expected
-
-          complete = complete_forecast and complete_report
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"complete={str(complete).lower()}\n")
-              handle.write(f"forecast_exists={str(complete_forecast).lower()}\n")
-              handle.write(f"report_exists={str(complete_report).lower()}\n")
-          print({
-              "delivery_date": delivery,
-              "forecast_periods": periods,
-              "forecast_complete": complete_forecast,
-              "report_complete": complete_report,
-              "already_archived": complete,
-          })
-          PY
-
-      - name: Confirm existing archive and exit successfully
+      - name: Confirm existing archive
         if: steps.dates.outputs.proceed == 'true' && steps.archive.outputs.complete == 'true'
         run: |
           echo "Forecast, plots and 30-minute table for ${{ steps.dates.outputs.delivery_date }} are already permanently archived."
@@ -168,7 +125,7 @@ jobs:
         run: >-
           timeout 20m python -m gb_platform_v2.shadow_features
           --delivery-date "${{ steps.dates.outputs.delivery_date }}"
-          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --issue-time-utc "${{ steps.archive.outputs.effective_issue_time_utc }}"
           --config config/example.yaml
           --models operational_bundle/unpacked/models
           --output data/processed/shadow_features.parquet
@@ -180,7 +137,7 @@ jobs:
         shell: bash
         env:
           MODEL_VERSION: ${{ inputs.model_version || 'core-12m-operational-v1' }}
-          ISSUE_TIME_UTC: ${{ steps.dates.outputs.issue_time_utc }}
+          ISSUE_TIME_UTC: ${{ steps.archive.outputs.effective_issue_time_utc }}
           SCENARIOS: ${{ inputs.scenarios || '1000' }}
         run: |
           set -Eeuo pipefail
@@ -222,7 +179,7 @@ jobs:
           --reports-root live/reports
           --risk-log live/risk_log.csv
           --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
-          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --issue-time-utc "${{ steps.archive.outputs.effective_issue_time_utc }}"
           --delivery-date "${{ steps.dates.outputs.delivery_date }}"
           --run-id "${{ github.run_id }}"
           --run-attempt "${{ github.run_attempt }}"
@@ -239,7 +196,7 @@ jobs:
           --output-dir "logs/daily/${{ steps.dates.outputs.delivery_date }}/market-report-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
           --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
           --delivery-date "${{ steps.dates.outputs.delivery_date }}"
-          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --issue-time-utc "${{ steps.archive.outputs.effective_issue_time_utc }}"
           --run-id "${{ github.run_id }}"
           --run-attempt "${{ github.run_attempt }}"
           --scenarios "${{ inputs.scenarios || '1000' }}"
@@ -257,6 +214,7 @@ jobs:
           delivery = "${{ steps.dates.outputs.delivery_date }}"
           report_name = "market-report-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
           root = Path("logs/daily") / delivery
+          root.mkdir(parents=True, exist_ok=True)
           lines = [
               f"# GB half-hourly market dashboard — {delivery}", "",
               f"[Open the complete report]({report_name}/report.md)", "",
@@ -269,7 +227,6 @@ jobs:
               f"![Negative-price probability]({report_name}/plots/06_negative_price_probability.png)", "",
               f"[Open the complete 30-minute CSV table]({report_name}/half_hourly_system_and_price_table.csv)", "",
           ]
-          root.mkdir(parents=True, exist_ok=True)
           (root / "README.md").write_text("\n".join(lines), encoding="utf-8")
           PY
 
@@ -284,7 +241,7 @@ jobs:
           --system-forecast outputs/shadow/forecast/half_hourly_system_forecast.csv
           --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
           --delivery-date "${{ steps.dates.outputs.delivery_date }}"
-          --issue-time-utc "${{ steps.dates.outputs.issue_time_utc }}"
+          --issue-time-utc "${{ steps.archive.outputs.effective_issue_time_utc }}"
           --run-id "${{ github.run_id }}"
           --run-attempt "${{ github.run_attempt }}"
           --scenarios "${{ inputs.scenarios || '1000' }}"
