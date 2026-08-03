@@ -82,6 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     live_forecast.add_argument("--model-version", required=True)
     live_forecast.add_argument("--issue-time-utc", required=True)
     live_forecast.add_argument("--scenarios", type=int, default=1000)
+    live_forecast.add_argument(
+        "--reuse-existing-day",
+        action="store_true",
+        help="Reuse an exactly matching immutable forecast day while rebuilding reports",
+    )
 
     demo = sub.add_parser("demo", help="Run a complete synthetic demonstration")
     demo.add_argument("--days", type=int, default=220)
@@ -170,6 +175,7 @@ def main() -> None:
                 args.model_version,
                 args.issue_time_utc,
                 args.scenarios,
+                args.reuse_existing_day,
             )
         )
     elif args.command == "collect-elexon":
