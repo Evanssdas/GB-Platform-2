@@ -1,7 +1,8 @@
-"""Append-only forecast, actual and score storage.
+"""Append-only forecast and actual storage with reproducible derived scores.
 
-CSV is used for portability. Production deployments can replace these functions
-with a database while preserving the same unique-key and immutability rules.
+CSV is used for portability. Forecasts and actuals remain immutable source records.
+Scores are derived records and may be recomputed when additional supporting
+actuals, such as the prior-day persistence source, become available.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def _append_new_rows(
     path: str | Path,
     key: list[str],
 ) -> pd.DataFrame:
-    """Append unseen keys and silently skip already stored immutable keys."""
+    """Append unseen immutable keys and silently skip keys already stored."""
     existing = _read(path)
     incoming = _normalise_key_values(new_rows, key)
     if not existing.empty:
@@ -78,7 +79,35 @@ def _append_new_rows(
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(file, index=False)
-    return combined
+    return incoming
+
+
+def _upsert_derived_rows(
+    rows: pd.DataFrame,
+    path: str | Path,
+    key: list[str],
+) -> pd.DataFrame:
+    """Replace derived rows with the latest deterministic recomputation."""
+    missing = [column for column in key if column not in rows]
+    if missing:
+        raise KeyError(f"Missing derived key columns: {missing}")
+
+    incoming = _normalise_key_values(rows, key)
+    existing = _read(path)
+    if not existing.empty:
+        existing = _normalise_key_values(existing, key)
+        incoming_keys = set(map(tuple, incoming[key].itertuples(index=False, name=None)))
+        keep = [
+            tuple(row) not in incoming_keys
+            for row in existing[key].itertuples(index=False, name=None)
+        ]
+        existing = existing.loc[keep]
+
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    file = Path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(file, index=False)
+    return incoming
 
 
 def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
@@ -199,4 +228,4 @@ def grade_forecasts(
             "graded_at_utc": pd.Timestamp.now(tz="UTC"),
         }
     )
-    return _append_new_rows(scores, scores_path, SCORE_KEY)
+    return _upsert_derived_rows(scores, scores_path, SCORE_KEY)
