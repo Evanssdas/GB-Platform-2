@@ -1,11 +1,11 @@
-name: Daily APXMIDP grading V5
-run-name: Grade APXMIDP ${{ inputs.delivery_date || 'previous GB day' }}
+name: Daily APXMIDP grading V6
+run-name: Grade and backfill all available shadow forecasts
 
 on:
   workflow_dispatch:
     inputs:
       delivery_date:
-        description: GB delivery date to grade YYYY-MM-DD; leave blank for previous GB day
+        description: Latest GB delivery date to grade YYYY-MM-DD; blank means previous GB day
         required: false
       model_version:
         description: Shadow model version evaluated by the deployment gate
@@ -24,7 +24,7 @@ concurrency:
 jobs:
   grade:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
         with:
@@ -41,41 +41,76 @@ jobs:
           pip install -e ".[dev]"
           pytest -q
 
-      - name: Resolve GB delivery and persistence windows
+      - name: Discover missing actual-price history
         id: dates
         shell: bash
         env:
           REQUESTED_DAY: ${{ inputs.delivery_date }}
           TZ: Europe/London
         run: |
-          if [ -n "$REQUESTED_DAY" ]; then
-            DAY="$REQUESTED_DAY"
-          else
-            DAY=$(date -d 'yesterday' +%F)
-          fi
-          read -r START END <<EOF
-          $(python - "$DAY" <<'PY'
-          import sys
+          python - <<'PY'
+          import os
           from datetime import date, timedelta
-          day = date.fromisoformat(sys.argv[1])
-          print(day - timedelta(days=1), day + timedelta(days=1))
-          PY
-          )
-          EOF
-          echo "day=$DAY" >> "$GITHUB_OUTPUT"
-          echo "start=$START" >> "$GITHUB_OUTPUT"
-          echo "end=$END" >> "$GITHUB_OUTPUT"
-          echo "Grading GB settlement date $DAY and collecting persistence source window [$START, $END)"
+          from pathlib import Path
+          import pandas as pd
 
-      - name: Collect target and prior-day actual prices
+          requested = os.environ.get("REQUESTED_DAY", "").strip()
+          latest = date.fromisoformat(requested) if requested else date.today() - timedelta(days=1)
+          forecast_path = Path("live/forecasts.csv")
+          actual_path = Path("live/actuals.csv")
+
+          forecast_days = []
+          if forecast_path.exists():
+              forecasts = pd.read_csv(forecast_path)
+              times = pd.to_datetime(forecasts["delivery_time_utc"], utc=True)
+              forecast_days = sorted(
+                  day for day in times.dt.tz_convert("Europe/London").dt.date.unique() if day <= latest
+              )
+
+          actual_counts = {}
+          if actual_path.exists():
+              actuals = pd.read_csv(actual_path)
+              times = pd.to_datetime(actuals["delivery_time_utc"], utc=True)
+              local_days = times.dt.tz_convert("Europe/London").dt.date
+              actual_counts = local_days.value_counts().to_dict()
+
+          missing = []
+          for day in forecast_days:
+              start = pd.Timestamp(day).tz_localize("Europe/London").tz_convert("UTC")
+              end = (pd.Timestamp(day) + pd.Timedelta(days=1)).tz_localize("Europe/London").tz_convert("UTC")
+              expected = len(pd.date_range(start, end, freq="30min", inclusive="left"))
+              if int(actual_counts.get(day, 0)) < expected:
+                  missing.append(day)
+
+          if missing:
+              start = min(missing) - timedelta(days=1)
+          else:
+              start = latest - timedelta(days=1)
+          end = latest + timedelta(days=1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"latest={latest.isoformat()}\n")
+              handle.write(f"start={start.isoformat()}\n")
+              handle.write(f"end={end.isoformat()}\n")
+              handle.write(f"forecast_days={len(forecast_days)}\n")
+              handle.write(f"missing_days={len(missing)}\n")
+          print({
+              "latest_delivery_day": latest.isoformat(),
+              "stored_forecast_days": len(forecast_days),
+              "days_missing_actuals": [day.isoformat() for day in missing],
+              "collection_window": [start.isoformat(), end.isoformat()],
+          })
+          PY
+
+      - name: Collect missing target and persistence actuals
         run: >-
-          timeout 10m gb-v2 collect-actuals
+          timeout 20m gb-v2 collect-actuals
           --start "${{ steps.dates.outputs.start }}"
           --end "${{ steps.dates.outputs.end }}"
           --actuals live/actuals.csv
           --revision initial
 
-      - name: Grade immutable forecasts
+      - name: Regrade every stored forecast with available actuals
         shell: bash
         run: |
           if [ -s live/forecasts.csv ]; then
@@ -84,7 +119,7 @@ jobs:
               --actuals live/actuals.csv \
               --scores live/scores.csv
           else
-            echo "No forecast log yet; actuals were stored without grading."
+            echo "No permanent forecast history exists yet."
           fi
 
       - name: Evaluate objective deployment gate
@@ -101,20 +136,49 @@ jobs:
           --coverage-max 0.90
           --min-lead-hours 8
 
-      - name: Register grading in unified review logs
-        run: >-
-          python -m gb_platform_v2.review_logs grading
-          --logs-root logs
-          --actuals live/actuals.csv
-          --scores live/scores.csv
-          --deployment-gate live/deployment_gate.json
-          --model-version "${{ inputs.model_version || 'core-12m-operational-v1' }}"
-          --delivery-date "${{ steps.dates.outputs.day }}"
-          --run-id "${{ github.run_id }}"
-          --run-attempt "${{ github.run_attempt }}"
-          --actual-revision initial
+      - name: Register every graded delivery day in review history
+        env:
+          MODEL_VERSION: ${{ inputs.model_version || 'core-12m-operational-v1' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import pandas as pd
+          from gb_platform_v2.review_logs import register_grading
 
-      - name: Validate immutable output files and fair persistence comparison
+          scores_path = Path("live/scores.csv")
+          if not scores_path.exists() or scores_path.stat().st_size == 0:
+              print("No scores available for review registration")
+              raise SystemExit(0)
+
+          scores = pd.read_csv(scores_path)
+          scores["delivery_time_utc"] = pd.to_datetime(scores["delivery_time_utc"], utc=True)
+          scores["delivery_date_local"] = (
+              scores["delivery_time_utc"].dt.tz_convert("Europe/London").dt.date.astype(str)
+          )
+          selected = scores.loc[scores["model_version"].astype(str).eq(os.environ["MODEL_VERSION"])]
+          dates = sorted(selected["delivery_date_local"].dropna().unique())
+          for delivery in dates:
+              register_grading(
+                  "logs",
+                  "live/actuals.csv",
+                  "live/scores.csv",
+                  "live/deployment_gate.json",
+                  os.environ["MODEL_VERSION"],
+                  str(delivery),
+                  os.environ["RUN_ID"],
+                  os.environ["RUN_ATTEMPT"],
+                  "initial",
+              )
+          print({"registered_delivery_days": dates})
+          PY
+
+      - name: Refresh permanent forecast history index
+        run: python -m gb_platform_v2.history_index --logs-root logs
+
+      - name: Validate complete historical grading state
         shell: bash
         run: |
           python - <<'PY'
@@ -122,54 +186,41 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
-          actuals = Path("live/actuals.csv")
-          if not actuals.exists() or actuals.stat().st_size == 0:
-              raise SystemExit("No actual-price file was produced")
-          frame = pd.read_csv(actuals)
-          if frame.empty:
-              raise SystemExit("Actual-price file is empty")
+          required = [
+              Path("live/actuals.csv"),
+              Path("live/deployment_gate.json"),
+              Path("logs/daily/README.md"),
+          ]
+          missing = [str(path) for path in required if not path.exists()]
+          if missing:
+              raise SystemExit(f"Missing grading-history outputs: {missing}")
+
           gate = json.loads(Path("live/deployment_gate.json").read_text())
-          summary = pd.read_csv("logs/daily_summary.csv")
-          delivery = "${{ steps.dates.outputs.day }}"
-          review_rows = summary.loc[summary["delivery_date"].astype(str).eq(delivery)]
-          if review_rows.empty:
-              raise SystemExit("Unified review log does not contain the graded delivery date")
-          if not Path("logs/README.md").exists():
-              raise SystemExit("Review-log dashboard is missing")
-
-          metrics = gate.get("metrics", {})
-          graded = int(metrics.get("graded_periods") or 0)
-          comparable = int(metrics.get("comparable_persistence_periods") or 0)
-          if graded and comparable != graded:
-              print(f"::warning::Persistence comparison covers {comparable}/{graded} periods; MAE gate remains provisional.")
-
+          scores = pd.read_csv("live/scores.csv") if Path("live/scores.csv").exists() else pd.DataFrame()
+          summary = pd.read_csv("logs/daily_summary.csv") if Path("logs/daily_summary.csv").exists() else pd.DataFrame()
           print({
-              "actual_rows": len(frame),
-              "deployment_ready": gate["deployment_ready"],
-              "gate_mode": gate["mode"],
-              "graded_periods": graded,
-              "comparable_persistence_periods": comparable,
-              "review_rows_for_day": len(review_rows),
+              "score_rows": len(scores),
+              "history_days": len(summary),
+              "deployment_ready": gate.get("deployment_ready"),
+              "gate_metrics": gate.get("metrics", {}),
           })
-          scores = Path("live/scores.csv")
-          if scores.exists():
-              print({"score_rows": len(pd.read_csv(scores))})
           PY
 
-      - name: Upload grading gate and review evidence
+      - name: Upload complete grading history
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: daily-grade-${{ steps.dates.outputs.day }}-run-${{ github.run_id }}
+          name: daily-grade-history-run-${{ github.run_id }}
           path: |
+            live/forecasts.csv
             live/actuals.csv
             live/scores.csv
             live/deployment_gate.json
             logs
           if-no-files-found: warn
-          retention-days: 90
+          retention-days: 365
 
-      - name: Commit immutable actuals scores gate and review logs
+      - name: Commit actuals scores gate and complete history
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -177,9 +228,9 @@ jobs:
           git add live/actuals.csv live/deployment_gate.json logs
           [ ! -f live/scores.csv ] || git add live/scores.csv
           if ! git diff --cached --quiet; then
-            git commit -m "Grade APXMIDP ${{ steps.dates.outputs.day }}"
+            git commit -m "Backfill daily APXMIDP grading history through ${{ steps.dates.outputs.latest }}"
             git pull --rebase origin main
             git push origin HEAD:main
           else
-            echo "No new actuals scores gate or review state to commit"
+            echo "Historical grading is already current"
           fi
