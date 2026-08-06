@@ -16,6 +16,7 @@ This folder is the human-readable review layer. The append-only files under `liv
 
 | Delivery date | P50 mean | VaR | Expected shortfall | Model MAE | Persistence MAE | Improvement | Coverage |
 |---|---:|---:|---:|---:|---:|---:|---:|
+| 2026-08-07 | 70.20 | 13,846.52 | 15,304.53 | — | — | — | — |
 | 2026-08-06 | 59.51 | 15,979.38 | 18,170.12 | — | — | — | — |
 | 2026-08-05 | 69.09 | 26,440.87 | 28,375.67 | 37.17 | 38.52 | 3.51% | 0.146 |
 | 2026-08-04 | 70.83 | 15,821.87 | 17,843.04 | 49.23 | 8.13 | -505.51% | 0.000 |
@@ -33,5 +34,5 @@ This folder is the human-readable review layer. The append-only files under `liv
 - [`latest_deployment_gate.json`](latest_deployment_gate.json): latest deployment-gate state.
 - [`daily/`](daily): permanent detailed JSON records grouped by delivery date.
 
-Registered forecast runs: **5**  
+Registered forecast runs: **6**  
 Registered grading runs: **5**
