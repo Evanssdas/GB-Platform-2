@@ -1,0 +1,111 @@
+{
+  "workflow_revision": "daily-market-report-v1",
+  "model_version": "core-12m-operational-v1",
+  "model_profile": "core_without_battery",
+  "delivery_date": "2026-08-30",
+  "issue_time_utc": "2026-08-29T15:45:30.798389+00:00",
+  "github_run_id": "33261105296",
+  "github_run_attempt": "1",
+  "monte_carlo_scenarios": 1000,
+  "period_count": 48,
+  "component_sources": {
+    "demand_mw": "fallback_d7",
+    "embedded_wind_mw": "model",
+    "embedded_solar_mw": "model",
+    "transmission_wind_mw": "model",
+    "nuclear_mw": "fallback_d7",
+    "net_import_mw": "model",
+    "inertia_gvas": "model"
+  },
+  "risk_and_position_limits": {
+    "paper_capital_gbp": 500000.0,
+    "var_budget_fraction": 0.02,
+    "daily_risk_budget_gbp": 10000.0,
+    "confidence_level": 0.95,
+    "reference_position_mwh": 100.0,
+    "reference_scenario_var_gbp": 16484.338113367194,
+    "reference_expected_shortfall_gbp": 18548.2249217454,
+    "reference_worst_loss_gbp": 26370.58735282684,
+    "reference_best_profit_gbp": 5726.710558453864,
+    "reference_var_budget_utilisation_percent": 164.84338113367195,
+    "reference_es_budget_utilisation_percent": 185.482249217454,
+    "maximum_volume_var_mwh": 60.6636428543708,
+    "maximum_volume_expected_shortfall_mwh": 53.913514862957534,
+    "maximum_volume_binding_mwh": 53.913514862957534
+  },
+  "peaks": {
+    "peak_demand": {
+      "value": 26392.0,
+      "timestamp_local": "2026-08-30 20:30 BST"
+    },
+    "peak_total_wind": {
+      "value": 9269.63875983596,
+      "timestamp_local": "2026-08-30 23:00 BST"
+    },
+    "peak_solar": {
+      "value": 7275.466797852849,
+      "timestamp_local": "2026-08-30 13:00 BST"
+    },
+    "minimum_nuclear": {
+      "value": 4389.0,
+      "timestamp_local": "2026-08-30 01:00 BST"
+    },
+    "peak_residual_after_nuclear": {
+      "value": 14081.163211920168,
+      "timestamp_local": "2026-08-30 20:30 BST"
+    },
+    "peak_net_system_short": {
+      "value": 9150.436737729948,
+      "timestamp_local": "2026-08-30 20:30 BST"
+    },
+    "peak_p50_price": {
+      "value": 103.70099221298,
+      "timestamp_local": "2026-08-30 19:30 BST"
+    },
+    "minimum_p50_price": {
+      "value": 26.378523034631197,
+      "timestamp_local": "2026-08-30 13:00 BST"
+    }
+  },
+  "daily_system_energy": [
+    {
+      "metric": "Demand energy",
+      "value": 466073.0,
+      "unit": "MWh"
+    },
+    {
+      "metric": "Total wind energy",
+      "value": 175878.64151647856,
+      "unit": "MWh"
+    },
+    {
+      "metric": "Solar energy",
+      "value": 54268.74555507529,
+      "unit": "MWh"
+    },
+    {
+      "metric": "Nuclear energy",
+      "value": 105636.5,
+      "unit": "MWh"
+    },
+    {
+      "metric": "Net import energy",
+      "value": 124091.96655267628,
+      "unit": "MWh"
+    }
+  ],
+  "price_summary": {
+    "p50_min_gbp_mwh": 26.378523034631197,
+    "p50_mean_gbp_mwh": 65.35600904185623,
+    "p50_max_gbp_mwh": 103.70099221298,
+    "maximum_negative_price_probability": 0.001
+  },
+  "definitions": {
+    "total_wind_mw": "embedded_wind_mw + transmission_wind_mw",
+    "residual_before_nuclear_mw": "demand_mw - total_wind_mw - embedded_solar_mw",
+    "residual_after_nuclear_mw": "residual_before_nuclear_mw - nuclear_mw",
+    "net_system_short_mw": "residual_after_nuclear_mw - net_import_mw",
+    "maximum_volume_var_mwh": "reference_position_mwh * daily_risk_budget_gbp / reference_scenario_var_gbp",
+    "maximum_volume_binding_mwh": "minimum of VaR-based and Expected-Shortfall-based maximum volumes"
+  }
+}
