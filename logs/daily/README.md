@@ -5,6 +5,7 @@ Each dated folder preserves the 30-minute forecast table, plots, model metadata 
 | Delivery day | Forecast report | Grading | Model MAE | Persistence MAE | Improvement | P10–P90 coverage |
 |---|---|---|---:|---:|---:|---:|
 | 2026-09-04 | [2026-09-04](2026-09-04/README.md) | Pending | — | — | — | — |
+| 2026-09-03 | 2026-09-03 | Graded (48 periods) | 69.91 | 47.36 | -47.62% | 0.104 |
 | 2026-09-02 | [2026-09-02](2026-09-02/README.md) | Graded (48 periods) | 80.21 | 49.03 | -63.61% | 0.000 |
 | 2026-09-01 | [2026-09-01](2026-09-01/README.md) | Graded (48 periods) | 54.98 | 18.97 | -189.90% | 0.229 |
 | 2026-08-31 | [2026-08-31](2026-08-31/README.md) | Graded (48 periods) | 68.87 | 31.60 | -117.96% | 0.042 |
