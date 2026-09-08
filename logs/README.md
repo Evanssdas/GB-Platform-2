@@ -6,18 +6,18 @@ This folder is the human-readable review layer. The append-only files under `liv
 
 - **Mode:** `shadow_only`
 - **Deployment ready:** `False`
-- **Graded days:** 36 / 30
-- **Model MAE:** 58.54 GBP/MWh
-- **Persistence MAE:** 26.70 GBP/MWh
-- **Improvement:** -119.25%
-- **P10–P90 coverage:** 0.058
+- **Graded days:** 37 / 30
+- **Model MAE:** 59.62 GBP/MWh
+- **Persistence MAE:** 27.66 GBP/MWh
+- **Improvement:** -115.56%
+- **P10–P90 coverage:** 0.056
 
 ## Latest daily results
 
 | Delivery date | P50 mean | VaR | Expected shortfall | Model MAE | Persistence MAE | Improvement | Coverage |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | 2026-09-08 | 36.32 | 9,994.05 | 12,333.79 | — | — | — | — |
-| 2026-09-07 | 40.60 | 11,764.97 | 13,837.98 | — | — | — | — |
+| 2026-09-07 | 40.60 | 11,764.97 | 13,837.98 | 97.62 | 61.34 | -59.14% | 0.000 |
 | 2026-09-06 | 40.37 | 11,752.85 | 13,826.21 | 64.45 | 40.60 | -58.75% | 0.167 |
 | 2026-09-05 | 41.04 | 6,274.16 | 8,000.79 | 40.79 | 86.06 | 52.60% | 0.375 |
 | 2026-09-04 | 35.31 | 12,027.53 | 13,767.19 | 51.71 | 41.03 | -26.03% | 0.188 |
@@ -42,4 +42,4 @@ This folder is the human-readable review layer. The append-only files under `liv
 - [`daily/`](daily): permanent detailed JSON records grouped by delivery date.
 
 Registered forecast runs: **37**  
-Registered grading runs: **37**
+Registered grading runs: **38**
