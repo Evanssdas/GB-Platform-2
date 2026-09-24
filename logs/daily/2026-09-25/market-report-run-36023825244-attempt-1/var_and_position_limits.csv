@@ -1,0 +1,15 @@
+metric,value,unit
+Paper capital,500000.0,GBP
+Daily VaR appetite,2.0,% capital
+Daily risk budget,10000.0,GBP
+Confidence level,95.0,%
+Reference position,100.0,MWh
+Scenario VaR,13950.267562073459,GBP
+Expected Shortfall,15449.49860826672,GBP
+Worst simulated loss,19423.161958696946,GBP
+Best simulated profit,9698.619988146136,GBP
+VaR budget utilisation,139.5026756207346,%
+ES budget utilisation,154.4949860826672,%
+Maximum volume by VaR,71.68321292408014,MWh
+Maximum volume by Expected Shortfall,64.72701965000468,MWh
+Binding maximum permissible volume,64.72701965000468,MWh
