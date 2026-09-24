@@ -1,6 +1,6 @@
 {
   "workflow_revision": "review-grading-v1",
-  "delivery_date": "2026-09-23",
+  "delivery_date": "2026-08-29",
   "model_version": "core-12m-operational-v1",
   "actual_revision": "initial",
   "github_run_id": "36011754813",
@@ -8,12 +8,12 @@
   "grading_metrics": {
     "actual_periods": 48,
     "graded_periods": 48,
-    "model_mae_gbp_mwh": 70.59332113895483,
-    "model_rmse_gbp_mwh": 72.74394788904425,
-    "model_bias_gbp_mwh": -70.59332113895483,
-    "persistence_mae_gbp_mwh": 13.506666666666666,
-    "improvement_percent": -422.6553884917683,
-    "p10_p90_coverage": 0.0,
+    "model_mae_gbp_mwh": 56.09290821868371,
+    "model_rmse_gbp_mwh": 65.09825318936672,
+    "model_bias_gbp_mwh": -56.010941129595324,
+    "persistence_mae_gbp_mwh": 35.79208333333333,
+    "improvement_percent": -56.71875731928722,
+    "p10_p90_coverage": 0.0625,
     "actual_negative_periods": 0
   },
   "deployment_gate": {
