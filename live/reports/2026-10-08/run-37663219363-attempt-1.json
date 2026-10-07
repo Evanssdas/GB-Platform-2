@@ -1,0 +1,42 @@
+{
+  "workflow_revision": "shadow-risk-report-v1",
+  "model_version": "core-12m-operational-v1",
+  "delivery_date": "2026-10-08",
+  "issue_time_utc": "2026-10-07T17:58:37.804042+00:00",
+  "github_run_id": "37663219363",
+  "github_run_attempt": "1",
+  "monte_carlo_scenarios": 1000,
+  "position_mwh": 100.0,
+  "confidence_level": 0.95,
+  "period_count": 48,
+  "expected_period_count": 48,
+  "p50_daily_min_gbp_mwh": 23.524603120882677,
+  "p50_daily_max_gbp_mwh": 120.68805856694354,
+  "p50_daily_mean_gbp_mwh": 65.36664813076949,
+  "probability_any_negative_period": 0.023,
+  "component_sources": {
+    "demand_mw": "fallback_d7",
+    "embedded_wind_mw": "model",
+    "embedded_solar_mw": "model",
+    "transmission_wind_mw": "model",
+    "nuclear_mw": "fallback_d7",
+    "net_import_mw": "model",
+    "inertia_gvas": "model"
+  },
+  "component_point_values_clipped_at_zero": {
+    "demand_mw": 0,
+    "embedded_wind_mw": 0,
+    "embedded_solar_mw": 10,
+    "transmission_wind_mw": 0,
+    "nuclear_mw": 0,
+    "net_import_mw": 0,
+    "inertia_gvas": 0
+  },
+  "risk_gbp": {
+    "scenario_var": 9992.676046871677,
+    "expected_shortfall": 12218.58714252213,
+    "worst_loss": 17131.872513445876,
+    "best_profit": 12706.406437799493
+  },
+  "source_artifact_path": "outputs/shadow/forecast/daily_report.json"
+}
