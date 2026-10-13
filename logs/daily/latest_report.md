@@ -1,20 +1,20 @@
-# GB day-ahead market report — 2026-10-13
+# GB day-ahead market report — 2026-10-14
 
 **Model:** `core-12m-operational-v1`  
 **Profile:** `core_without_battery`  
-**Issue time:** `2026-10-12T20:26:28.105719+00:00`  
+**Issue time:** `2026-10-13T18:32:10.618633+00:00`  
 **Monte Carlo scenarios:** `1,000`  
 **Settlement periods:** `48`
 
 ## Executive summary
 
-- P50 price range: **£11.95–£99.70/MWh**; daily mean **£55.05/MWh**.
-- Peak demand: **32,935 MW** at **2026-10-13 19:00 BST**.
-- Peak residual demand after nuclear: **10,485 MW** at **2026-10-13 19:00 BST**.
-- Scenario VaR for the illustrative 100 MWh position: **£14,573.94**.
-- Expected Shortfall: **£16,615.24**.
-- Maximum volume under the VaR limit: **68.62 MWh**.
-- Conservative binding maximum under both VaR and Expected Shortfall: **60.19 MWh**.
+- P50 price range: **£26.96–£104.75/MWh**; daily mean **£65.36/MWh**.
+- Peak demand: **33,715 MW** at **2026-10-14 19:00 BST**.
+- Peak residual demand after nuclear: **17,021 MW** at **2026-10-14 08:00 BST**.
+- Scenario VaR for the illustrative 100 MWh position: **£12,531.61**.
+- Expected Shortfall: **£14,269.79**.
+- Maximum volume under the VaR limit: **79.80 MWh**.
+- Conservative binding maximum under both VaR and Expected Shortfall: **70.08 MWh**.
 
 > Position limits are illustrative paper-risk outputs, not autonomous trading authorisation or financial advice.
 
@@ -28,11 +28,11 @@
 
 | metric | value | unit |
 |---|---|---|
-| Demand energy | 638,613.5 | MWh |
-| Total wind energy | 430,952.4 | MWh |
-| Solar energy | 43,202.9 | MWh |
-| Nuclear energy | 96,183.0 | MWh |
-| Net import energy | 18,170.2 | MWh |
+| Demand energy | 645,037.5 | MWh |
+| Total wind energy | 358,959.5 | MWh |
+| Solar energy | 43,004.6 | MWh |
+| Nuclear energy | 96,118.0 | MWh |
+| Net import energy | 32,684.5 | MWh |
 
 ### Component forecast sources
 
@@ -75,15 +75,15 @@ The position limit uses the explicitly labelled paper assumptions below. Risk is
 | Daily risk budget | 10,000.00 | GBP |
 | Confidence level | 95.00 | % |
 | Reference position | 100.00 | MWh |
-| Scenario VaR | 14,573.94 | GBP |
-| Expected Shortfall | 16,615.24 | GBP |
-| Worst simulated loss | 21,004.16 | GBP |
-| Best simulated profit | 8,433.50 | GBP |
-| VaR budget utilisation | 145.74 | % |
-| ES budget utilisation | 166.15 | % |
-| Maximum volume by VaR | 68.62 | MWh |
-| Maximum volume by Expected Shortfall | 60.19 | MWh |
-| Binding maximum permissible volume | 60.19 | MWh |
+| Scenario VaR | 12,531.61 | GBP |
+| Expected Shortfall | 14,269.79 | GBP |
+| Worst simulated loss | 17,912.01 | GBP |
+| Best simulated profit | 9,187.32 | GBP |
+| VaR budget utilisation | 125.32 | % |
+| ES budget utilisation | 142.70 | % |
+| Maximum volume by VaR | 79.80 | MWh |
+| Maximum volume by Expected Shortfall | 70.08 | MWh |
+| Binding maximum permissible volume | 70.08 | MWh |
 
 ![Risk position limits](plots/07_risk_position_limits.png)
 

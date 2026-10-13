@@ -1,0 +1,69 @@
+{
+  "workflow_revision": "review-forecast-v1",
+  "delivery_date": "2026-10-14",
+  "model_version": "core-12m-operational-v1",
+  "issue_time_utc": "2026-10-13T18:32:10Z",
+  "github_run_id": "38447497624",
+  "github_run_attempt": "1",
+  "monte_carlo_scenarios": 1000,
+  "feature_summary": {
+    "workflow_revision": "shadow-features-v2",
+    "delivery_date_local": "2026-10-14",
+    "issue_time_utc": "2026-10-13T18:32:10.618633+00:00",
+    "period_count": 48,
+    "expected_period_count": 48,
+    "timestamp_min": "2026-10-13T23:00:00+00:00",
+    "timestamp_max": "2026-10-14T22:30:00+00:00",
+    "trained_feature_count": 64,
+    "fallback_targets": [
+      "demand_mw",
+      "nuclear_mw"
+    ],
+    "weather_source": "Open-Meteo current forecast retrieved over complete UTC settlement span",
+    "fallback_source": "Elexon observed profile at exact UTC timestamp minus 168 hours",
+    "leakage_gate": "passed"
+  },
+  "daily_report": {
+    "period_count": 48,
+    "p50_daily_min_gbp_mwh": 26.9615737197605,
+    "p50_daily_max_gbp_mwh": 104.75013873732043,
+    "p50_daily_mean_gbp_mwh": 65.3577234963746,
+    "probability_any_negative_period": 0.055,
+    "maximum_period_negative_probability": 0.015,
+    "distribution_daily_min_p10": 2.4804299552966365,
+    "distribution_daily_min_p50": 11.918045958024617,
+    "distribution_daily_min_p90": 22.00767281021015,
+    "distribution_daily_max_p10": 101.6513947334113,
+    "distribution_daily_max_p50": 111.83013308242231,
+    "distribution_daily_max_p90": 126.27183811609201,
+    "model_profile": "core_without_battery",
+    "operational_bundle_ready": true,
+    "component_sources": {
+      "demand_mw": "fallback_d7",
+      "embedded_wind_mw": "model",
+      "embedded_solar_mw": "model",
+      "transmission_wind_mw": "model",
+      "nuclear_mw": "fallback_d7",
+      "net_import_mw": "model",
+      "inertia_gvas": "model"
+    },
+    "component_point_values_clipped_at_zero": {
+      "demand_mw": 0,
+      "embedded_wind_mw": 0,
+      "embedded_solar_mw": 8,
+      "transmission_wind_mw": 0,
+      "nuclear_mw": 0,
+      "net_import_mw": 0,
+      "inertia_gvas": 0
+    },
+    "component_error_file": "operational_component_errors.parquet",
+    "risk": {
+      "scenario_var": 12531.61251063067,
+      "expected_shortfall": 14269.792442197002,
+      "worst_loss": 17912.006739376942,
+      "best_profit": 9187.321611390573
+    }
+  },
+  "price_forecast_rows": 48,
+  "system_forecast_rows": 48
+}
