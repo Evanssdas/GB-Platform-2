@@ -40,3 +40,10 @@ issue_time:
   # Day-ahead forecast issue time in local GB time.
   local_hour: 13
   local_minute: 0
+
+
+# Optional market-regime datasets. Training remains valid when these files are
+# absent; when present they are selected point-in-time and used only by the
+# price layer.
+optional_paths:
+  entsoe_neighbour_prices: data/parsed/entsoe/neighbour_prices.parquet
