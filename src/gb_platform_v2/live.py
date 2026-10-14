@@ -114,6 +114,14 @@ def run_and_log_forecast(
     prices["model_version"] = model_version
     if (prices["delivery_time_utc"] <= issue).any():
         raise ValueError("Forecast delivery periods must all be later than issue time")
+    minimum_lead_hours = (
+        prices["delivery_time_utc"].min() - issue
+    ) / pd.Timedelta(hours=1)
+    if float(minimum_lead_hours) < 8.0:
+        raise ValueError(
+            "Day-ahead shadow forecast requires at least 8 hours lead to the first "
+            f"delivery period; observed {float(minimum_lead_hours):.2f} hours"
+        )
     prices["issue_time_utc"] = issue
 
     reused = False
