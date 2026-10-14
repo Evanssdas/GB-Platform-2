@@ -117,6 +117,16 @@ def build_half_hourly_dataset(
     price_column = _required(columns, "price_gbp_mwh")
     demand_column = _required(columns, "demand_mw")
     base = price[["timestamp", price_column]].rename(columns={price_column: "price_gbp_mwh"})
+
+    # Observable market-regime anchors. At a D-1 13:00 issue time the complete
+    # D-1 price profile is not available, so use exact timestamp D-2 and D-7
+    # prices. These features let the price model adapt to the current price level
+    # without leaking future delivery-day information.
+    price_lookup = base.set_index("timestamp")["price_gbp_mwh"].astype(float)
+    for days in (2, 7):
+        source_times = pd.DatetimeIndex(base["timestamp"]) - pd.Timedelta(days=days)
+        base[f"price_d{days}_gbp_mwh"] = price_lookup.reindex(source_times).to_numpy()
+
     base = base.merge(
         demand[["timestamp", demand_column]].rename(columns={demand_column: "demand_mw"}),
         on="timestamp",
