@@ -16,7 +16,11 @@ from .models import (
 )
 from .reporting import daily_price_summary, plot_price_fan_chart, write_json
 from .risk import scenario_risk
-from .scenarios import bootstrap_error_scenarios, run_price_monte_carlo
+from .scenarios import (
+    bootstrap_error_scenarios,
+    calibrate_scenario_result,
+    run_price_monte_carlo,
+)
 from .validation import expanding_oof_predictions
 
 
@@ -275,6 +279,7 @@ def forecast_platform(
     output_dir: str | Path,
     scenarios: int = 1000,
     position_mwh: float = 100.0,
+    calibration: dict | None = None,
 ) -> dict:
     model_dir = Path(model_dir)
     output_dir = Path(output_dir)
@@ -298,6 +303,19 @@ def forecast_platform(
         scenarios=scenarios,
     )
     result = run_price_monte_carlo(point, component_scenarios, price_model)
+    calibration = calibration or {}
+    if calibration.get("enabled"):
+        result = calibrate_scenario_result(
+            result,
+            bias_correction_gbp_mwh=float(
+                calibration.get("bias_correction_gbp_mwh", 0.0)
+            ),
+            dispersion_scale=float(calibration.get("dispersion_scale", 1.0)),
+        )
+        point["price_point_gbp_mwh"] = (
+            point["price_point_gbp_mwh"]
+            + float(calibration.get("bias_correction_gbp_mwh", 0.0))
+        )
 
     price_output = result.quantiles.copy()
     price_output["point"] = point["price_point_gbp_mwh"]
@@ -320,6 +338,7 @@ def forecast_platform(
     report["component_sources"] = component_sources
     report["component_point_values_clipped_at_zero"] = clipped_counts
     report["component_error_file"] = error_file
+    report["live_calibration"] = calibration
     report["risk"] = scenario_risk(
         result.price_paths,
         point["price_point_gbp_mwh"].to_numpy(),
