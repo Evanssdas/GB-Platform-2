@@ -9,7 +9,7 @@ import pandas as pd
 from .calibration import fit_live_calibration
 from .data.elexon import ElexonClient
 from .data.parsers import parse_elexon_mid
-from .features import add_cyclical_time_features, add_weather_features
+from .features import add_cyclical_time_features, add_market_regime_features, add_weather_features
 from .live_store import append_actuals, append_forecasts, grade_forecasts
 from .pipeline import forecast_platform
 
@@ -22,7 +22,8 @@ def _load_feature_frame(path: str | Path) -> pd.DataFrame:
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     frame = frame.set_index("timestamp", drop=False).sort_index()
     frame = add_cyclical_time_features(frame)
-    return add_weather_features(frame)
+    frame = add_weather_features(frame)
+    return add_market_regime_features(frame)
 
 
 def _existing_forecast_covers_delivery_day(
