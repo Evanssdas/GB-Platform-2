@@ -92,6 +92,45 @@ def _weather_group(
     )
 
 
+def _collect_price_anchors(
+    periods_utc: pd.DatetimeIndex,
+    output_dir: Path,
+) -> pd.DataFrame:
+    """Collect observable D-2 and D-7 APXMIDP price anchors for each delivery period."""
+    source_times = periods_utc.append(
+        pd.DatetimeIndex(
+            [
+                *(periods_utc - pd.Timedelta(days=2)),
+                *(periods_utc - pd.Timedelta(days=7)),
+            ]
+        )
+    )
+    local = source_times.tz_convert(LONDON_TZ)
+    first_day = pd.Timestamp(local.min().date())
+    end_day = pd.Timestamp(local.max().date()) + pd.Timedelta(days=1)
+    collect_elexon_core(
+        first_day.strftime("%Y-%m-%d"),
+        end_day.strftime("%Y-%m-%d"),
+        output_dir,
+        chunk_days=1,
+    )
+    price = pd.read_parquet(output_dir / "elexon_mid.parquet")
+    price["timestamp"] = pd.to_datetime(price["timestamp"], utc=True)
+    price = price.set_index("timestamp").sort_index()
+    if "price_gbp_mwh" not in price:
+        raise KeyError("Elexon MID is missing price_gbp_mwh")
+
+    anchors = pd.DataFrame(index=periods_utc)
+    for days in (2, 7):
+        lookup_times = periods_utc - pd.Timedelta(days=days)
+        anchors[f"price_d{days}_gbp_mwh"] = (
+            price["price_gbp_mwh"].reindex(lookup_times).to_numpy()
+        )
+    if anchors.isna().any().any():
+        raise ValueError("Observable price-anchor history is incomplete")
+    return anchors
+
+
 def _collect_d7_fallbacks(
     periods_utc: pd.DatetimeIndex,
     output_dir: Path,
@@ -175,6 +214,16 @@ def build_shadow_features(
     frame["model_profile"] = metadata.get("model_profile")
 
     required_features = list(metadata.get("features", []))
+    price_anchor_features = {
+        column for column in ("price_d2_gbp_mwh", "price_d7_gbp_mwh")
+        if column in required_features
+    }
+    if price_anchor_features:
+        frame = frame.join(
+            _collect_price_anchors(periods_utc, Path(recent_dir)),
+            how="left",
+        )
+
     missing = [column for column in required_features if column not in frame]
     if missing:
         raise KeyError(f"Live feature table is missing trained features: {missing}")
@@ -202,6 +251,8 @@ def build_shadow_features(
         "fallback_targets": sorted(fallback_targets),
         "weather_source": "Open-Meteo current forecast retrieved over complete UTC settlement span",
         "fallback_source": "Elexon observed profile at exact UTC timestamp minus 168 hours",
+        "price_anchor_features": sorted(price_anchor_features),
+        "price_anchor_source": "Elexon APXMIDP at exact UTC timestamp minus 48 and 168 hours",
         "leakage_gate": "passed",
     }
     summary_file = Path(summary_path) if summary_path else output.with_suffix(".json")
