@@ -211,7 +211,8 @@ def build_shadow_features(
     frame["delivery_date"] = delivery.date()
     frame["model_profile"] = metadata.get("model_profile")
 
-    required_features = list(metadata.get("features", []))
+    component_features = list(metadata.get("features", []))
+    required_features = list(metadata.get("input_features", component_features))
     price_anchor_features = {
         column for column in ("price_d2_gbp_mwh", "price_d7_gbp_mwh")
         if column in required_features
@@ -222,13 +223,22 @@ def build_shadow_features(
             how="left",
         )
 
+    # Price-only market-regime inputs are optional at runtime. LightGBM can
+    # natively handle NaN, so keep the trained column contract without inventing
+    # values when a market feed is unavailable. Physical/component inputs remain
+    # strict because those models depend on them directly.
+    optional_market_features = set(metadata.get("market_regime_features", []))
     missing = [column for column in required_features if column not in frame]
-    if missing:
-        raise KeyError(f"Live feature table is missing trained features: {missing}")
-    nulls = frame[required_features].isna().sum()
-    nulls = {column: int(value) for column, value in nulls.items() if value}
-    if nulls:
-        raise ValueError(f"Live trained features contain nulls: {nulls}")
+    strict_missing = [column for column in missing if column not in optional_market_features]
+    if strict_missing:
+        raise KeyError(f"Live feature table is missing trained features: {strict_missing}")
+    for column in missing:
+        frame[column] = pd.NA
+
+    strict_nulls = frame[component_features].isna().sum() if component_features else pd.Series(dtype=int)
+    strict_nulls = {column: int(value) for column, value in strict_nulls.items() if value}
+    if strict_nulls:
+        raise ValueError(f"Live component features contain nulls: {strict_nulls}")
     for target in fallback_targets:
         column = f"fallback_d7_{target}"
         if column not in frame or frame[column].isna().any():
@@ -246,6 +256,11 @@ def build_shadow_features(
         "timestamp_min": periods_utc.min().isoformat(),
         "timestamp_max": periods_utc.max().isoformat(),
         "trained_feature_count": len(required_features),
+        "component_feature_count": len(component_features),
+        "optional_market_features": sorted(optional_market_features),
+        "optional_market_features_missing_live": sorted(
+            column for column in optional_market_features if frame[column].isna().all()
+        ),
         "fallback_targets": sorted(fallback_targets),
         "weather_source": "Open-Meteo current forecast retrieved over complete UTC settlement span",
         "fallback_source": "Elexon observed profile at exact UTC timestamp minus 168 hours",
