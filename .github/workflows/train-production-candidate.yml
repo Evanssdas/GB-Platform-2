@@ -4,14 +4,10 @@ run-name: Production candidate ${{ inputs.start_date }} to ${{ inputs.end_date }
 on:
   workflow_dispatch:
     inputs:
-      first_history_run_id:
-        description: Historical V4 run covering the first contiguous interval
+      history_run_ids:
+        description: Comma-separated Historical V4 run IDs covering contiguous intervals
         required: true
-        default: "30589833583"
-      second_history_run_id:
-        description: Historical V4 run covering the second contiguous interval
-        required: true
-        default: "30589892204"
+        default: "30589833583,30589892204"
       start_date:
         description: Inclusive first GB settlement date
         required: true
@@ -54,7 +50,7 @@ jobs:
       - name: Bootstrap output directories
         shell: bash
         run: |
-          mkdir -p inputs/history_1 inputs/history_2
+          mkdir -p inputs
           mkdir -p data/parsed data/processed models/production_candidate outputs/production_candidate
 
       - name: Install and test
@@ -70,8 +66,7 @@ jobs:
           END_DATE: ${{ inputs.end_date }}
           HOLDOUT_ROWS: ${{ inputs.holdout_rows }}
           SPLITS: ${{ inputs.time_series_splits }}
-          FIRST_RUN: ${{ inputs.first_history_run_id }}
-          SECOND_RUN: ${{ inputs.second_history_run_id }}
+          HISTORY_RUN_IDS: ${{ inputs.history_run_ids }}
         run: |
           python - <<'PY'
           import json
@@ -95,12 +90,14 @@ jobs:
               raise SystemExit("The holdout must leave at least 120 days for training")
           if not 3 <= splits <= 7:
               raise SystemExit("time_series_splits must be between 3 and 7")
-          for key in ("FIRST_RUN", "SECOND_RUN"):
-              if not os.environ[key].isdigit():
-                  raise SystemExit(f"{key} must be a numeric GitHub Actions run ID")
+          run_ids = [item.strip() for item in os.environ["HISTORY_RUN_IDS"].split(",") if item.strip()]
+          if not run_ids or any(not item.isdigit() for item in run_ids):
+              raise SystemExit("history_run_ids must be a comma-separated list of numeric GitHub run IDs")
+          if len(run_ids) > 8:
+              raise SystemExit("At most 8 historical artifacts are supported in one candidate run")
           payload = {
-              "workflow_revision": "production-candidate-v2",
-              "source_history_run_ids": [os.environ["FIRST_RUN"], os.environ["SECOND_RUN"]],
+              "workflow_revision": "production-candidate-v3",
+              "source_history_run_ids": run_ids,
               "start_date_inclusive": str(start),
               "end_date_exclusive": str(end),
               "requested_days": days,
@@ -115,30 +112,31 @@ jobs:
           print(json.dumps(payload, indent=2))
           PY
 
-      - name: Download first audited historical artifact
+      - name: Download audited historical artifacts
         shell: bash
         env:
-          RUN_ID: ${{ inputs.first_history_run_id }}
+          HISTORY_RUN_IDS: ${{ inputs.history_run_ids }}
         run: |
-          timeout 10m gh run download "$RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name "historical-v4-run-${RUN_ID}-attempt-1" \
-            --dir inputs/history_1
-
-      - name: Download second audited historical artifact
-        shell: bash
-        env:
-          RUN_ID: ${{ inputs.second_history_run_id }}
-        run: |
-          timeout 10m gh run download "$RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name "historical-v4-run-${RUN_ID}-attempt-1" \
-            --dir inputs/history_2
+          set -Eeuo pipefail
+          index=0
+          IFS=',' read -ra RUNS <<< "$HISTORY_RUN_IDS"
+          for raw in "${RUNS[@]}"; do
+            RUN_ID="$(echo "$raw" | xargs)"
+            [ -n "$RUN_ID" ] || continue
+            index=$((index + 1))
+            target="inputs/history_${index}"
+            mkdir -p "$target"
+            timeout 10m gh run download "$RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "historical-v4-run-${RUN_ID}-attempt-1" \
+              --dir "$target"
+          done
+          echo "Downloaded $index historical artifacts"
 
       - name: Verify downloaded artifact manifests
         shell: bash
         run: |
-          for directory in inputs/history_1 inputs/history_2; do
+          for directory in inputs/history_*; do
             test -f "$directory/workflow_context.json"
             test -f "$directory/workflow_status.json"
             test -f "$directory/data_audit.json"
@@ -151,7 +149,7 @@ jobs:
       - name: Merge and reconstruct point-in-time source tree
         run: >-
           timeout 35m python -m gb_platform_v2.history_artifacts
-          --inputs inputs/history_1 inputs/history_2
+          --inputs inputs/history_*
           --output data/parsed
           --start "${{ inputs.start_date }}"
           --end "${{ inputs.end_date }}"
@@ -369,7 +367,7 @@ jobs:
               "models/production_candidate/historical_component_errors.parquet",
           ]
           status = {
-              "workflow_revision": "production-candidate-v2",
+              "workflow_revision": "production-candidate-v3",
               "required_files": {path: Path(path).exists() for path in required},
           }
           status["complete"] = all(status["required_files"].values())
