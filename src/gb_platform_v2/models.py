@@ -57,7 +57,7 @@ def train_regressor(
     scale: float = 50.0,
     params: dict | None = None,
 ) -> TrainedRegressor:
-    clean = frame.dropna(subset=[*features, target]).copy()
+    clean = frame.dropna(subset=[target]).copy()
     if clean.empty:
         raise ValueError(f"No complete rows available for target {target}")
     y = clean[target].to_numpy(dtype=float)

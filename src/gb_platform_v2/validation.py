@@ -23,7 +23,7 @@ def expanding_oof_predictions(
     can predict them. Each populated row is predicted by a model trained only on
     earlier rows.
     """
-    clean = frame.dropna(subset=[*features, target]).copy()
+    clean = frame.dropna(subset=[target]).copy()
     if len(clean) < n_splits + 2:
         raise ValueError("Not enough complete rows for time-series out-of-fold prediction")
 

@@ -23,8 +23,12 @@ from .features import (
     add_system_balance_features,
     add_weather_features,
 )
-from .live import collect_and_append_price_actuals, run_and_log_forecast
-from .live_store import grade_forecasts
+from .live import (
+    collect_and_append_component_actuals,
+    collect_and_append_price_actuals,
+    run_and_log_forecast,
+)
+from .live_store import grade_component_forecasts, grade_forecasts
 from .pipeline import forecast_platform, train_platform
 from .synthetic import make_synthetic_history
 
@@ -109,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=7,
         help="Past delivered days used for rolling bias and dispersion calibration",
     )
+    live_forecast.add_argument(
+        "--component-forecasts",
+        default=None,
+        help="Optional immutable store for component forecasts",
+    )
 
     demo = sub.add_parser("demo", help="Run a complete synthetic demonstration")
     demo.add_argument("--days", type=int, default=220)
@@ -133,6 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
     actuals.add_argument("--end", required=True)
     actuals.add_argument("--actuals", default="live/actuals.csv")
     actuals.add_argument("--revision", default="initial")
+
+    component_actuals = sub.add_parser(
+        "collect-component-actuals",
+        help="Append observable Elexon component actuals for forecast diagnostics",
+    )
+    component_actuals.add_argument("--start", required=True)
+    component_actuals.add_argument("--end", required=True)
+    component_actuals.add_argument("--actuals", default="live/component_actuals.csv")
+    component_actuals.add_argument("--revision", default="initial")
+    component_actuals.add_argument("--work-dir", default="data/parsed/component_actuals")
 
     neso = sub.add_parser("collect-neso", help="Collect one complete NESO CKAN resource")
     neso.add_argument("--resource-id", required=True)
@@ -176,6 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
     grade.add_argument("--actuals", required=True)
     grade.add_argument("--scores", required=True)
 
+    grade_components = sub.add_parser(
+        "grade-components",
+        help="Grade stored component forecasts against component actuals",
+    )
+    grade_components.add_argument("--forecasts", required=True)
+    grade_components.add_argument("--actuals", required=True)
+    grade_components.add_argument("--scores", required=True)
+
     return parser
 
 
@@ -201,6 +228,7 @@ def main() -> None:
                 args.scores,
                 args.calibration_source_model_version,
                 args.calibration_lookback_days,
+                args.component_forecasts,
             )
         )
     elif args.command == "collect-elexon":
@@ -213,6 +241,15 @@ def main() -> None:
             args.end,
             args.actuals,
             args.revision,
+        )
+        print({"rows": len(result)})
+    elif args.command == "collect-component-actuals":
+        result = collect_and_append_component_actuals(
+            args.start,
+            args.end,
+            args.actuals,
+            args.revision,
+            args.work_dir,
         )
         print({"rows": len(result)})
     elif args.command == "collect-neso":
@@ -235,6 +272,9 @@ def main() -> None:
         print({"rows": len(frame), "output": args.output})
     elif args.command == "grade":
         result = grade_forecasts(args.forecasts, args.actuals, args.scores)
+        print({"rows_appended": len(result)})
+    elif args.command == "grade-components":
+        result = grade_component_forecasts(args.forecasts, args.actuals, args.scores)
         print({"rows_appended": len(result)})
     else:
         history = make_synthetic_history(args.days)

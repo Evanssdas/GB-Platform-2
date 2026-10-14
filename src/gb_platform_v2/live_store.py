@@ -15,6 +15,15 @@ import pandas as pd
 FORECAST_KEY = ["model_version", "issue_time_utc", "delivery_time_utc"]
 ACTUAL_KEY = ["delivery_time_utc", "actual_revision"]
 SCORE_KEY = ["forecast_id", "actual_revision"]
+COMPONENT_FORECAST_KEY = ["model_version", "issue_time_utc", "delivery_time_utc"]
+COMPONENT_ACTUAL_KEY = ["delivery_time_utc", "actual_revision"]
+COMPONENT_SCORE_KEY = [
+    "model_version",
+    "issue_time_utc",
+    "delivery_time_utc",
+    "actual_revision",
+    "component",
+]
 
 
 def _read(path: str | Path) -> pd.DataFrame:
@@ -164,6 +173,106 @@ def _upsert_derived_rows(
     file.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(file, index=False)
     return changed_rows
+
+
+
+def append_component_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
+    """Append immutable wide component forecasts for one model/day."""
+    out = rows.copy()
+    out["issue_time_utc"] = pd.to_datetime(out["issue_time_utc"], utc=True)
+    out["delivery_time_utc"] = pd.to_datetime(out["delivery_time_utc"], utc=True)
+    return _append_unique(out, path, COMPONENT_FORECAST_KEY)
+
+
+def append_component_actuals(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:
+    """Append observed Elexon component actuals without rewriting history."""
+    out = rows.copy()
+    out["delivery_time_utc"] = pd.to_datetime(out["delivery_time_utc"], utc=True)
+    return _append_new_rows(out, path, COMPONENT_ACTUAL_KEY)
+
+
+def grade_component_forecasts(
+    forecasts_path: str | Path,
+    actuals_path: str | Path,
+    scores_path: str | Path,
+) -> pd.DataFrame:
+    """Grade every component that exists in both forecast and actual stores."""
+    forecasts = _read(forecasts_path)
+    actuals = _read(actuals_path)
+    if forecasts.empty or actuals.empty:
+        return pd.DataFrame()
+
+    forecasts["delivery_time_utc"] = pd.to_datetime(
+        forecasts["delivery_time_utc"], utc=True, errors="raise"
+    )
+    forecasts["issue_time_utc"] = pd.to_datetime(
+        forecasts["issue_time_utc"], utc=True, errors="raise"
+    )
+    actuals["delivery_time_utc"] = pd.to_datetime(
+        actuals["delivery_time_utc"], utc=True, errors="raise"
+    )
+
+    reserved = {
+        "model_version",
+        "issue_time_utc",
+        "delivery_time_utc",
+        "actual_revision",
+    }
+    components = sorted((set(forecasts.columns) & set(actuals.columns)) - reserved)
+    if not components:
+        return pd.DataFrame()
+
+    joined = forecasts.merge(actuals, on="delivery_time_utc", how="inner")
+    parts: list[pd.DataFrame] = []
+    for component in components:
+        forecast_col = f"{component}_x" if f"{component}_x" in joined else component
+        actual_col = f"{component}_y" if f"{component}_y" in joined else component
+        if forecast_col not in joined or actual_col not in joined:
+            continue
+        forecast_value = pd.to_numeric(joined[forecast_col], errors="coerce")
+        actual_value = pd.to_numeric(joined[actual_col], errors="coerce")
+        valid = forecast_value.notna() & actual_value.notna()
+        if not valid.any():
+            continue
+        part = pd.DataFrame(
+            {
+                "model_version": joined.loc[valid, "model_version"].astype(str),
+                "issue_time_utc": joined.loc[valid, "issue_time_utc"],
+                "delivery_time_utc": joined.loc[valid, "delivery_time_utc"],
+                "actual_revision": joined.loc[valid, "actual_revision"].astype(str),
+                "component": component,
+                "forecast_value": forecast_value.loc[valid],
+                "actual_value": actual_value.loc[valid],
+            }
+        )
+        part["error"] = part["forecast_value"] - part["actual_value"]
+        part["absolute_error"] = part["error"].abs()
+        parts.append(part)
+
+    if not parts:
+        return pd.DataFrame()
+    scores = pd.concat(parts, ignore_index=True)
+    return _upsert_derived_rows(scores, scores_path, COMPONENT_SCORE_KEY)
+
+
+def component_score_summary(
+    scores_path: str | Path,
+    model_version: str | None = None,
+) -> dict[str, dict[str, float | int]]:
+    """Return compact MAE and bias diagnostics for each live component."""
+    scores = _read(scores_path)
+    if scores.empty:
+        return {}
+    if model_version is not None:
+        scores = scores.loc[scores["model_version"].astype(str).eq(str(model_version))]
+    summary: dict[str, dict[str, float | int]] = {}
+    for component, group in scores.groupby("component"):
+        summary[str(component)] = {
+            "rows": int(len(group)),
+            "mae": float(pd.to_numeric(group["absolute_error"], errors="coerce").mean()),
+            "bias": float(pd.to_numeric(group["error"], errors="coerce").mean()),
+        }
+    return summary
 
 
 def append_forecasts(rows: pd.DataFrame, path: str | Path) -> pd.DataFrame:

@@ -7,10 +7,18 @@ from pathlib import Path
 import pandas as pd
 
 from .calibration import fit_live_calibration
+from .collection import collect_elexon_core
 from .data.elexon import ElexonClient
 from .data.parsers import parse_elexon_mid
 from .features import add_cyclical_time_features, add_market_regime_features, add_weather_features
-from .live_store import append_actuals, append_forecasts, grade_forecasts
+from .live_store import (
+    append_actuals,
+    append_component_actuals,
+    append_component_forecasts,
+    append_forecasts,
+    grade_component_forecasts,
+    grade_forecasts,
+)
 from .pipeline import forecast_platform
 
 
@@ -79,6 +87,7 @@ def run_and_log_forecast(
     scores_path: str | Path | None = None,
     calibration_source_model_version: str | None = None,
     calibration_lookback_days: int = 7,
+    component_forecasts_path: str | Path | None = None,
 ) -> dict:
     """Run the frozen model and append immutable probabilistic forecasts.
 
@@ -150,6 +159,34 @@ def run_and_log_forecast(
             forecasts_path,
         )
 
+        if component_forecasts_path is not None:
+            system_path = Path(output_dir) / "half_hourly_system_forecast.csv"
+            system = pd.read_csv(system_path, index_col=0)
+            system.index = pd.to_datetime(system.index, utc=True)
+            system = system.rename_axis("delivery_time_utc").reset_index()
+            component_columns = [
+                column
+                for column in (
+                    "demand_mw",
+                    "transmission_wind_mw",
+                    "nuclear_mw",
+                    "net_import_mw",
+                    "embedded_wind_mw",
+                    "embedded_solar_mw",
+                    "inertia_gvas",
+                )
+                if column in system
+            ]
+            component_rows = system[["delivery_time_utc", *component_columns]].copy()
+            component_rows["model_version"] = model_version
+            component_rows["issue_time_utc"] = issue
+            append_component_forecasts(
+                component_rows[
+                    ["model_version", "issue_time_utc", "delivery_time_utc", *component_columns]
+                ],
+                component_forecasts_path,
+            )
+
     if isinstance(report, dict):
         report = dict(report)
         report["forecast_log_status"] = (
@@ -195,6 +232,54 @@ def collect_and_append_price_actuals(
     )[["delivery_time_utc", "actual_price"]]
     actuals["actual_revision"] = revision
     return append_actuals(actuals, actuals_path)
+
+
+
+def collect_and_append_component_actuals(
+    start: str,
+    end: str,
+    actuals_path: str | Path,
+    revision: str,
+    work_dir: str | Path,
+) -> pd.DataFrame:
+    """Collect directly observable Elexon component outturns for grading."""
+    paths = collect_elexon_core(start, end, work_dir, chunk_days=1)
+    demand = pd.read_parquet(paths["demand"])
+    fuel = pd.read_parquet(paths["fuel"])
+    interconnectors = pd.read_parquet(paths["interconnectors"])
+    for frame in (demand, fuel, interconnectors):
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+
+    actuals = demand[["timestamp", "demand_mw"]].copy()
+    for source, target in (
+        ("fuel_wind_mw", "transmission_wind_mw"),
+        ("fuel_nuclear_mw", "nuclear_mw"),
+    ):
+        if source in fuel:
+            actuals = actuals.merge(
+                fuel[["timestamp", source]].rename(columns={source: target}),
+                on="timestamp",
+                how="left",
+                validate="one_to_one",
+            )
+    if "net_import_mw" in interconnectors:
+        actuals = actuals.merge(
+            interconnectors[["timestamp", "net_import_mw"]],
+            on="timestamp",
+            how="left",
+            validate="one_to_one",
+        )
+    actuals = actuals.rename(columns={"timestamp": "delivery_time_utc"})
+    actuals["actual_revision"] = revision
+    return append_component_actuals(actuals, actuals_path)
+
+
+def grade_live_components(
+    forecasts_path: str | Path,
+    actuals_path: str | Path,
+    scores_path: str | Path,
+) -> pd.DataFrame:
+    return grade_component_forecasts(forecasts_path, actuals_path, scores_path)
 
 
 def grade_live_store(

@@ -110,6 +110,24 @@ jobs:
           --actuals live/actuals.csv
           --revision initial
 
+      - name: Collect observable component actuals
+        if: hashFiles('live/component_forecasts.csv') != ''
+        run: >-
+          timeout 20m gb-v2 collect-component-actuals
+          --start "${{ steps.dates.outputs.start }}"
+          --end "${{ steps.dates.outputs.end }}"
+          --actuals live/component_actuals.csv
+          --revision initial
+          --work-dir data/parsed/component_actuals
+
+      - name: Grade stored component forecasts
+        if: hashFiles('live/component_forecasts.csv') != '' && hashFiles('live/component_actuals.csv') != ''
+        run: >-
+          gb-v2 grade-components
+          --forecasts live/component_forecasts.csv
+          --actuals live/component_actuals.csv
+          --scores live/component_scores.csv
+
       - name: Regrade every stored forecast with available actuals
         shell: bash
         run: |
@@ -198,11 +216,25 @@ jobs:
           gate = json.loads(Path("live/deployment_gate.json").read_text())
           scores = pd.read_csv("live/scores.csv") if Path("live/scores.csv").exists() else pd.DataFrame()
           summary = pd.read_csv("logs/daily_summary.csv") if Path("logs/daily_summary.csv").exists() else pd.DataFrame()
+          component_scores = (
+              pd.read_csv("live/component_scores.csv")
+              if Path("live/component_scores.csv").exists()
+              else pd.DataFrame()
+          )
+          component_summary = {}
+          if not component_scores.empty:
+              for component, group in component_scores.groupby("component"):
+                  component_summary[str(component)] = {
+                      "rows": int(len(group)),
+                      "mae": float(pd.to_numeric(group["absolute_error"], errors="coerce").mean()),
+                      "bias": float(pd.to_numeric(group["error"], errors="coerce").mean()),
+                  }
           print({
               "score_rows": len(scores),
               "history_days": len(summary),
               "deployment_ready": gate.get("deployment_ready"),
               "gate_metrics": gate.get("metrics", {}),
+              "component_metrics": component_summary,
           })
           PY
 
@@ -215,6 +247,9 @@ jobs:
             live/forecasts.csv
             live/actuals.csv
             live/scores.csv
+            live/component_forecasts.csv
+            live/component_actuals.csv
+            live/component_scores.csv
             live/deployment_gate.json
             logs
           if-no-files-found: warn
@@ -227,6 +262,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add live/actuals.csv live/deployment_gate.json logs
           [ ! -f live/scores.csv ] || git add live/scores.csv
+          [ ! -f live/component_actuals.csv ] || git add live/component_actuals.csv
+          [ ! -f live/component_scores.csv ] || git add live/component_scores.csv
           if ! git diff --cached --quiet; then
             git commit -m "Backfill daily APXMIDP grading history through ${{ steps.dates.outputs.latest }}"
             git pull --rebase origin main

@@ -8,6 +8,7 @@ from ..timebase import settlement_periods_for_day
 
 NESO_RESOURCES = {
     "embedded_current": "db6c038f-98af-4570-ab60-24d71ebd0ae5",
+    "embedded_2026": "31861619-0b86-47ba-bac2-d008a760af54",
     "embedded_2026_h1": "d6375700-69c2-4c25-8bde-883a205d742e",
     "embedded_2025": "fc13df13-2dad-4a1c-b9e3-4569efba4955",
     "embedded_2024": "06abd00a-ef6b-488b-9b6d-5e08fdc0c890",

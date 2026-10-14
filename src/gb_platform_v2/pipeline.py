@@ -51,6 +51,21 @@ DERIVED_TARGET_COLUMNS = {
     "residual_after_nuclear_mw",
     "net_system_short_mw",
 }
+PRICE_LAYER_PREFIXES = (
+    "price_d",
+    "gas_price_",
+    "eua_",
+    "ccgt_",
+)
+PRICE_LAYER_SUFFIXES = (
+    "_day_ahead_price_eur_mwh",
+)
+
+
+def _is_price_layer_feature(column: str) -> bool:
+    return column.startswith(PRICE_LAYER_PREFIXES) or column.endswith(PRICE_LAYER_SUFFIXES)
+
+
 BASE_NON_FEATURE_COLUMNS = {
     "timestamp",
     "timestamp_utc",
@@ -134,9 +149,17 @@ def train_platform(
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     profile, component_targets = _component_targets(frame)
-    features = choose_numeric_features(frame, BASE_NON_FEATURE_COLUMNS)
-    if not features:
+    input_features = choose_numeric_features(frame, BASE_NON_FEATURE_COLUMNS)
+    if not input_features:
         raise ValueError("No model features found")
+    market_regime_features = [
+        column for column in input_features if _is_price_layer_feature(column)
+    ]
+    features = [
+        column for column in input_features if column not in market_regime_features
+    ]
+    if not features:
+        raise ValueError("No physical/component model features found")
 
     metrics: dict[str, dict] = {}
     component_errors = pd.DataFrame(index=frame.index)
@@ -163,6 +186,7 @@ def train_platform(
 
     price_features = [
         *features,
+        *market_regime_features,
         *component_targets,
         "total_wind_mw",
         "renewable_mw",
@@ -174,13 +198,24 @@ def train_platform(
         dict.fromkeys(column for column in price_features if column in price_training.columns)
     )
 
-    metrics["price_gbp_mwh"] = chronological_holdout_score(
-        price_training,
-        price_features,
-        "price_gbp_mwh",
-        holdout_rows,
-        transform="arcsinh",
-        scale=50.0,
+    price_variant_metrics = {}
+    for transform in ("arcsinh", "identity"):
+        price_variant_metrics[transform] = chronological_holdout_score(
+            price_training,
+            price_features,
+            "price_gbp_mwh",
+            holdout_rows,
+            transform=transform,
+            scale=50.0,
+        )
+    selected_price_transform = min(
+        price_variant_metrics,
+        key=lambda name: price_variant_metrics[name]["model_mae"],
+    )
+    metrics["price_gbp_mwh"] = dict(
+        price_variant_metrics[selected_price_transform],
+        selected_transform=selected_price_transform,
+        variant_metrics=price_variant_metrics,
     )
 
     # Keep an honest out-of-fold price residual alongside the component errors.
@@ -192,7 +227,7 @@ def train_platform(
         price_features,
         "price_gbp_mwh",
         n_splits=time_series_splits,
-        transform="arcsinh",
+        transform=selected_price_transform,
         scale=50.0,
     )
     component_errors["price_error_gbp_mwh"] = (
@@ -203,7 +238,7 @@ def train_platform(
         price_training,
         price_features,
         "price_gbp_mwh",
-        transform="arcsinh",
+        transform=selected_price_transform,
         scale=50.0,
     ).save(model_dir / "price_gbp_mwh.joblib")
 
@@ -227,9 +262,13 @@ def train_platform(
             "model_profile": profile,
             "component_targets": component_targets,
             "features": features,
+            "input_features": input_features,
+            "market_regime_features": market_regime_features,
             "price_features": price_features,
             "metrics": metrics,
             "stacking": "expanding_window_out_of_fold",
+            "price_transform_selected": selected_price_transform,
+            "price_transform_candidates": price_variant_metrics,
             "price_error_column": "price_error_gbp_mwh",
             "price_error_definition": "actual APXMIDP minus out-of-fold price forecast",
             "time_series_splits": time_series_splits,
