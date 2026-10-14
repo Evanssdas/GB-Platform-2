@@ -105,11 +105,16 @@ def build_half_hourly_dataset(
     with Path(mapping_path).open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     paths = config["paths"]
+    optional_paths = config.get("optional_paths", {})
     columns = config["columns"]
     optional = config.get("optional_columns", {})
     required_components = _component_profile(config)
 
     loaded = {name: _read(path) for name, path in paths.items()}
+    for name, path in optional_paths.items():
+        source = Path(path)
+        if source.exists():
+            loaded[name] = _read(source)
     price = _timestamp(loaded["elexon_price"])
     demand = _timestamp(loaded["elexon_demand"])
     fuel = _timestamp(loaded["elexon_fuel"])
@@ -163,6 +168,47 @@ def build_half_hourly_dataset(
         int(issue_settings.get("local_hour", 13)),
         int(issue_settings.get("local_minute", 0)),
     )
+
+    # Optional neighbouring day-ahead power prices from ENTSO-E. Select only
+    # values whose publication timestamp was available by the configured issue
+    # time, then merge numeric price columns as price-model regime features.
+    if "entsoe_neighbour_prices" in loaded:
+        neighbour = _timestamp(loaded["entsoe_neighbour_prices"]).copy()
+        publication_columns = [
+            column for column in neighbour
+            if column.endswith("_price_published_at_utc")
+        ]
+        for column in publication_columns:
+            neighbour[column] = pd.to_datetime(
+                neighbour[column], utc=True, errors="coerce"
+            )
+        price_columns = [
+            column for column in neighbour
+            if column.endswith("_day_ahead_price_eur_mwh")
+        ]
+        selected_rows: list[pd.DataFrame] = []
+        for issue_time, delivery_group in base.groupby("issue_time_utc", sort=True):
+            delivery_times = set(delivery_group["timestamp"])
+            subset = neighbour.loc[neighbour["timestamp"].isin(delivery_times)].copy()
+            if subset.empty:
+                continue
+            for price_column in price_columns:
+                prefix = price_column.removesuffix("_day_ahead_price_eur_mwh")
+                published = f"{prefix}_price_published_at_utc"
+                if published in subset:
+                    subset.loc[subset[published] > issue_time, price_column] = pd.NA
+            selected_rows.append(subset[["timestamp", *price_columns]])
+        if selected_rows:
+            neighbour_asof = (
+                pd.concat(selected_rows, ignore_index=True)
+                .drop_duplicates("timestamp", keep="last")
+            )
+            base = base.merge(
+                neighbour_asof,
+                on="timestamp",
+                how="left",
+                validate="one_to_one",
+            )
 
     selected_embedded: list[pd.DataFrame] = []
     for issue_time, delivery_group in base.groupby("issue_time_utc", sort=True):
