@@ -97,13 +97,11 @@ def _collect_price_anchors(
     output_dir: Path,
 ) -> pd.DataFrame:
     """Collect observable D-2 and D-7 APXMIDP price anchors for each delivery period."""
-    source_times = periods_utc.append(
-        pd.DatetimeIndex(
-            [
-                *(periods_utc - pd.Timedelta(days=2)),
-                *(periods_utc - pd.Timedelta(days=7)),
-            ]
-        )
+    source_times = pd.DatetimeIndex(
+        [
+            *(periods_utc - pd.Timedelta(days=2)),
+            *(periods_utc - pd.Timedelta(days=7)),
+        ]
     )
     local = source_times.tz_convert(LONDON_TZ)
     first_day = pd.Timestamp(local.min().date())
