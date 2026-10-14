@@ -16,6 +16,10 @@ on:
         description: Immutable model version
         required: true
         default: core-12m-operational-v1
+      release_asset:
+        description: Frozen model zip asset within the release
+        required: true
+        default: operational-core-v1.zip
       scenarios:
         description: Monte Carlo scenarios
         required: true
@@ -115,8 +119,9 @@ jobs:
           TAG: ${{ inputs.release_tag || 'operational-core-v1' }}
         run: |
           mkdir -p operational_bundle
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern operational-core-v1.zip --dir operational_bundle
-          unzip -q operational_bundle/operational-core-v1.zip -d operational_bundle/unpacked
+          ASSET="${{ inputs.release_asset || 'operational-core-v1.zip' }}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET" --dir operational_bundle
+          unzip -q "operational_bundle/$ASSET" -d operational_bundle/unpacked
           test -f operational_bundle/unpacked/models/metadata.json
           test -f operational_bundle/unpacked/models/operational_component_errors.parquet
 
