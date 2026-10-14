@@ -210,6 +210,56 @@ def build_half_hourly_dataset(
                 validate="one_to_one",
             )
 
+    # Optional point-in-time gas/carbon market series. The file must include
+    # published_at_utc so the builder can reject information unavailable at the
+    # D-1 issue time. Values are carried backward/as-of by market timestamp.
+    if "market_regime" in loaded:
+        market = _timestamp(loaded["market_regime"]).copy()
+        if "published_at_utc" not in market:
+            raise KeyError(
+                "Optional market_regime input requires published_at_utc for leakage control"
+            )
+        market["published_at_utc"] = pd.to_datetime(
+            market["published_at_utc"], utc=True, errors="coerce"
+        )
+        value_columns = [
+            column
+            for column in ("gas_price_gbp_mwh_th", "eua_gbp_tco2")
+            if column in market
+        ]
+        if value_columns:
+            selected_market: list[pd.DataFrame] = []
+            for issue_time, delivery_group in base.groupby("issue_time_utc", sort=True):
+                eligible = market.loc[
+                    market["published_at_utc"].notna()
+                    & market["published_at_utc"].le(issue_time)
+                ].copy()
+                if eligible.empty:
+                    continue
+                eligible = (
+                    eligible.sort_values(["timestamp", "published_at_utc"])
+                    .drop_duplicates("timestamp", keep="last")
+                )
+                delivery = delivery_group[["timestamp"]].sort_values("timestamp")
+                aligned = pd.merge_asof(
+                    delivery,
+                    eligible[["timestamp", *value_columns]].sort_values("timestamp"),
+                    on="timestamp",
+                    direction="backward",
+                )
+                selected_market.append(aligned)
+            if selected_market:
+                market_asof = (
+                    pd.concat(selected_market, ignore_index=True)
+                    .drop_duplicates("timestamp", keep="last")
+                )
+                base = base.merge(
+                    market_asof,
+                    on="timestamp",
+                    how="left",
+                    validate="one_to_one",
+                )
+
     selected_embedded: list[pd.DataFrame] = []
     for issue_time, delivery_group in base.groupby("issue_time_utc", sort=True):
         eligible = select_latest_available(
