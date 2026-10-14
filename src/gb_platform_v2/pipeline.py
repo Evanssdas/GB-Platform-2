@@ -51,6 +51,19 @@ DERIVED_TARGET_COLUMNS = {
     "residual_after_nuclear_mw",
     "net_system_short_mw",
 }
+PRICE_LAYER_PREFIXES = (
+    "price_d",
+    "ccgt_",
+)
+PRICE_LAYER_SUFFIXES = (
+    "_day_ahead_price_eur_mwh",
+)
+
+
+def _is_price_layer_feature(column: str) -> bool:
+    return column.startswith(PRICE_LAYER_PREFIXES) or column.endswith(PRICE_LAYER_SUFFIXES)
+
+
 BASE_NON_FEATURE_COLUMNS = {
     "timestamp",
     "timestamp_utc",
@@ -134,9 +147,17 @@ def train_platform(
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     profile, component_targets = _component_targets(frame)
-    features = choose_numeric_features(frame, BASE_NON_FEATURE_COLUMNS)
-    if not features:
+    input_features = choose_numeric_features(frame, BASE_NON_FEATURE_COLUMNS)
+    if not input_features:
         raise ValueError("No model features found")
+    market_regime_features = [
+        column for column in input_features if _is_price_layer_feature(column)
+    ]
+    features = [
+        column for column in input_features if column not in market_regime_features
+    ]
+    if not features:
+        raise ValueError("No physical/component model features found")
 
     metrics: dict[str, dict] = {}
     component_errors = pd.DataFrame(index=frame.index)
@@ -163,6 +184,7 @@ def train_platform(
 
     price_features = [
         *features,
+        *market_regime_features,
         *component_targets,
         "total_wind_mw",
         "renewable_mw",
@@ -227,6 +249,8 @@ def train_platform(
             "model_profile": profile,
             "component_targets": component_targets,
             "features": features,
+            "input_features": input_features,
+            "market_regime_features": market_regime_features,
             "price_features": price_features,
             "metrics": metrics,
             "stacking": "expanding_window_out_of_fold",
