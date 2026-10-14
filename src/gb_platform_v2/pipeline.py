@@ -178,6 +178,23 @@ def train_platform(
         transform="arcsinh",
         scale=50.0,
     )
+
+    # Keep an honest out-of-fold price residual alongside the component errors.
+    # This captures price uncertainty that remains even when the physical
+    # component forecasts are correct (fuel/carbon regime, bidding, constraints,
+    # scarcity and other omitted market drivers).
+    price_oof = expanding_oof_predictions(
+        price_training,
+        price_features,
+        "price_gbp_mwh",
+        n_splits=time_series_splits,
+        transform="arcsinh",
+        scale=50.0,
+    )
+    component_errors["price_error_gbp_mwh"] = (
+        pd.to_numeric(frame["price_gbp_mwh"], errors="coerce") - price_oof
+    )
+
     train_regressor(
         price_training,
         price_features,
@@ -209,6 +226,8 @@ def train_platform(
             "price_features": price_features,
             "metrics": metrics,
             "stacking": "expanding_window_out_of_fold",
+            "price_error_column": "price_error_gbp_mwh",
+            "price_error_definition": "actual APXMIDP minus out-of-fold price forecast",
             "time_series_splits": time_series_splits,
         },
         model_dir / "metadata.json",
