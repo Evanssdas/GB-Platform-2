@@ -47,3 +47,6 @@ issue_time:
 # price layer.
 optional_paths:
   entsoe_neighbour_prices: data/parsed/entsoe/neighbour_prices.parquet
+  # Optional user/licensed point-in-time market series. Expected columns include
+  # timestamp plus any of gas_price_gbp_mwh_th, eua_gbp_tco2 and published_at_utc.
+  market_regime: data/parsed/market/market_regime.parquet
