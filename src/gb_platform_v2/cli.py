@@ -87,6 +87,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reuse an exactly matching immutable forecast day while rebuilding reports",
     )
+    live_forecast.add_argument(
+        "--scores",
+        default=None,
+        help="Optional graded score history used for rolling leakage-safe calibration",
+    )
+    live_forecast.add_argument(
+        "--calibration-source-model-version",
+        default=None,
+        help="Model version whose completed historical scores calibrate this forecast",
+    )
+    live_forecast.add_argument(
+        "--calibration-lookback-days",
+        type=int,
+        default=7,
+        help="Past delivered days used for rolling bias and dispersion calibration",
+    )
 
     demo = sub.add_parser("demo", help="Run a complete synthetic demonstration")
     demo.add_argument("--days", type=int, default=220)
@@ -176,6 +192,9 @@ def main() -> None:
                 args.issue_time_utc,
                 args.scenarios,
                 args.reuse_existing_day,
+                args.scores,
+                args.calibration_source_model_version,
+                args.calibration_lookback_days,
             )
         )
     elif args.command == "collect-elexon":
