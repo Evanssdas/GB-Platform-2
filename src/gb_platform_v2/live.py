@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .calibration import fit_live_calibration
 from .data.elexon import ElexonClient
 from .data.parsers import parse_elexon_mid
 from .features import add_cyclical_time_features, add_weather_features
@@ -74,6 +75,9 @@ def run_and_log_forecast(
     issue_time_utc: str | pd.Timestamp,
     scenarios: int = 1000,
     reuse_existing_day: bool = False,
+    scores_path: str | Path | None = None,
+    calibration_source_model_version: str | None = None,
+    calibration_lookback_days: int = 7,
 ) -> dict:
     """Run the frozen model and append immutable probabilistic forecasts.
 
@@ -83,7 +87,24 @@ def run_and_log_forecast(
     and plots after a partially failed workflow run.
     """
     features = _load_feature_frame(feature_path)
-    report = forecast_platform(features, model_dir, output_dir, scenarios)
+    calibration = (
+        fit_live_calibration(
+            scores_path,
+            forecasts_path,
+            issue,
+            source_model_version=calibration_source_model_version,
+            lookback_days=calibration_lookback_days,
+        )
+        if scores_path is not None
+        else {"enabled": False, "reason": "not_requested"}
+    )
+    report = forecast_platform(
+        features,
+        model_dir,
+        output_dir,
+        scenarios,
+        calibration=calibration,
+    )
     price_path = Path(output_dir) / "half_hourly_price_forecast.csv"
     prices = pd.read_csv(price_path, index_col=0)
     prices.index = pd.to_datetime(prices.index, utc=True)
