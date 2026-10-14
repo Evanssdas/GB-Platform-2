@@ -50,6 +50,7 @@ model:
     learning_rate: 0.03
     num_leaves: 31
     subsample: 0.85
+    subsample_freq: 1
     colsample_bytree: 0.85
     random_state: 42
 
