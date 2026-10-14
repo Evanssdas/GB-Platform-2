@@ -87,6 +87,8 @@ def run_and_log_forecast(
     and plots after a partially failed workflow run.
     """
     features = _load_feature_frame(feature_path)
+    issue = pd.Timestamp(issue_time_utc)
+    issue = issue.tz_localize("UTC") if issue.tzinfo is None else issue.tz_convert("UTC")
     calibration = (
         fit_live_calibration(
             scores_path,
@@ -110,8 +112,6 @@ def run_and_log_forecast(
     prices.index = pd.to_datetime(prices.index, utc=True)
     prices = prices.rename_axis("delivery_time_utc").reset_index()
     prices["model_version"] = model_version
-    issue = pd.Timestamp(issue_time_utc)
-    issue = issue.tz_localize("UTC") if issue.tzinfo is None else issue.tz_convert("UTC")
     if (prices["delivery_time_utc"] <= issue).any():
         raise ValueError("Forecast delivery periods must all be later than issue time")
     prices["issue_time_utc"] = issue
