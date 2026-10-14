@@ -19,6 +19,7 @@ DEFAULT_REGRESSOR_PARAMS = {
     "learning_rate": 0.03,
     "num_leaves": 31,
     "subsample": 0.85,
+    "subsample_freq": 1,
     "colsample_bytree": 0.85,
     "random_state": 42,
     "verbosity": -1,
@@ -86,12 +87,11 @@ def _daily_persistence_for_test(
     test: pd.DataFrame,
     target: str,
 ) -> pd.Series:
-    """Return the observed target at the exact UTC timestamp minus 24 hours.
+    """Return an observable day-ahead baseline at exact UTC timestamp minus 48 hours.
 
-    This avoids row-shift errors when a settlement day is excluded or when GB DST
-    produces 46- or 50-period local settlement days. Rows without a genuine
-    timestamp-matched daily baseline remain missing and are excluded from the
-    baseline comparison rather than filled with an unrelated value.
+    A complete D-1 price profile is not known at a D-1 13:00 forecast issue time.
+    D-2 is deliberately used so every comparison value was observable before the
+    forecast was issued. Timestamp matching remains DST-safe.
     """
     clean_timestamps = _timestamp_series(clean)
     history = pd.Series(
@@ -102,7 +102,7 @@ def _daily_persistence_for_test(
     if history.index.duplicated().any():
         raise ValueError("Timestamp-aware persistence requires unique timestamps")
     test_timestamps = pd.DatetimeIndex(_timestamp_series(test))
-    prior_timestamps = test_timestamps - pd.Timedelta(hours=24)
+    prior_timestamps = test_timestamps - pd.Timedelta(hours=48)
     baseline = history.reindex(prior_timestamps)
     baseline.index = test.index
     return baseline
@@ -139,7 +139,7 @@ def chronological_holdout_score(
         "comparison_rows": int(comparable.sum()),
         "holdout_rows": int(len(test)),
         "baseline_missing_rows": int((~baseline.notna()).sum()),
-        "baseline_definition": "observed target at exact timestamp minus 24 hours",
+        "baseline_definition": "observable day-ahead baseline at exact timestamp minus 48 hours",
     }
 
 
