@@ -16,8 +16,8 @@ on:
         description: NESO embedded archive covering the requested dates
         required: true
         type: choice
-        options: [embedded_2024, embedded_2025, embedded_2026_h1]
-        default: embedded_2025
+        options: [embedded_2024, embedded_2025, embedded_2026, embedded_2026_h1]
+        default: embedded_2026
       inertia_preset:
         description: NESO inertia archive covering the requested dates
         required: true
@@ -86,6 +86,7 @@ jobs:
           embedded_ranges = {
               "embedded_2024": (date(2024, 1, 1), date(2025, 1, 1)),
               "embedded_2025": (date(2025, 1, 1), date(2026, 1, 1)),
+              "embedded_2026": (date(2026, 1, 1), date(2027, 1, 1)),
               "embedded_2026_h1": (date(2026, 1, 1), date(2026, 7, 1)),
           }
           inertia_ranges = {
