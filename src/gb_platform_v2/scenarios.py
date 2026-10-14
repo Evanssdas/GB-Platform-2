@@ -23,11 +23,20 @@ def bootstrap_error_scenarios(
     component_columns: list[str],
     scenarios: int = 1000,
     random_seed: int = 42,
+    price_error_column: str | None = "price_error_gbp_mwh",
 ) -> dict[str, np.ndarray]:
-    """Sample complete historical error rows to preserve cross-component dependence."""
+    """Sample complete historical error rows to preserve empirical dependence.
+
+    When an out-of-fold price residual column is available it is sampled from the
+    same historical row as the component errors, so the scenario distribution
+    includes uncertainty left unexplained by the physical price model.
+    """
     if scenarios <= 0:
         raise ValueError("scenarios must be positive")
-    errors = historical_error_rows.dropna(subset=component_columns)
+    required = list(component_columns)
+    if price_error_column and price_error_column in historical_error_rows:
+        required.append(price_error_column)
+    errors = historical_error_rows.dropna(subset=required)
     if errors.empty:
         raise ValueError("No complete historical error rows")
     rng = np.random.default_rng(random_seed)
@@ -40,6 +49,8 @@ def bootstrap_error_scenarios(
         if column not in {"net_import_mw", "battery_net_mw"}:
             values = np.maximum(values, 0.0)
         output[column] = values
+    if price_error_column and price_error_column in errors:
+        output["__price_error_gbp_mwh__"] = errors[price_error_column].to_numpy()[draw_idx]
     return output
 
 
@@ -55,6 +66,8 @@ def run_price_monte_carlo(
     for scenario in range(scenario_count):
         frame = point_features.copy()
         for column, values in component_scenarios.items():
+            if column.startswith("__"):
+                continue
             frame[column] = values[scenario]
         frame["total_wind_mw"] = frame.get("embedded_wind_mw", 0) + frame.get(
             "transmission_wind_mw", 0
@@ -69,7 +82,11 @@ def run_price_monte_carlo(
             - frame.get("net_import_mw", 0)
             - frame.get("battery_net_mw", 0)
         )
-        paths[scenario] = price_model.predict(frame)
+        price_path = price_model.predict(frame)
+        residuals = component_scenarios.get("__price_error_gbp_mwh__")
+        if residuals is not None:
+            price_path = price_path + residuals[scenario]
+        paths[scenario] = price_path
 
     quantiles = pd.DataFrame(
         {
