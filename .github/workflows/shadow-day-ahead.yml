@@ -151,6 +151,9 @@ jobs:
             --model-version "$MODEL_VERSION" \
             --issue-time-utc "$ISSUE_TIME_UTC" \
             --scenarios "$SCENARIOS" \
+            --scores live/scores.csv \
+            --calibration-source-model-version "$MODEL_VERSION" \
+            --calibration-lookback-days 7 \
             --reuse-existing-day 2>&1 | tee outputs/shadow/live_forecast.log
           test -s outputs/shadow/forecast/half_hourly_price_forecast.csv
           test -s outputs/shadow/forecast/half_hourly_system_forecast.csv

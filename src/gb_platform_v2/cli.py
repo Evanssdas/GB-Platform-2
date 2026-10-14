@@ -17,7 +17,12 @@ from .collection import (
 )
 from .data.neso import NESO_RESOURCES
 from .dataset_builder import build_half_hourly_dataset
-from .features import add_cyclical_time_features, add_system_balance_features, add_weather_features
+from .features import (
+    add_cyclical_time_features,
+    add_market_regime_features,
+    add_system_balance_features,
+    add_weather_features,
+)
 from .live import collect_and_append_price_actuals, run_and_log_forecast
 from .live_store import grade_forecasts
 from .pipeline import forecast_platform, train_platform
@@ -36,6 +41,7 @@ def _load_frame(path: str) -> pd.DataFrame:
 def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
     out = add_cyclical_time_features(frame)
     out = add_weather_features(out)
+    out = add_market_regime_features(out)
     balance_columns = {
         "demand_mw",
         "embedded_wind_mw",
@@ -86,6 +92,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--reuse-existing-day",
         action="store_true",
         help="Reuse an exactly matching immutable forecast day while rebuilding reports",
+    )
+    live_forecast.add_argument(
+        "--scores",
+        default=None,
+        help="Optional graded score history used for rolling leakage-safe calibration",
+    )
+    live_forecast.add_argument(
+        "--calibration-source-model-version",
+        default=None,
+        help="Model version whose completed historical scores calibrate this forecast",
+    )
+    live_forecast.add_argument(
+        "--calibration-lookback-days",
+        type=int,
+        default=7,
+        help="Past delivered days used for rolling bias and dispersion calibration",
     )
 
     demo = sub.add_parser("demo", help="Run a complete synthetic demonstration")
@@ -176,6 +198,9 @@ def main() -> None:
                 args.issue_time_utc,
                 args.scenarios,
                 args.reuse_existing_day,
+                args.scores,
+                args.calibration_source_model_version,
+                args.calibration_lookback_days,
             )
         )
     elif args.command == "collect-elexon":

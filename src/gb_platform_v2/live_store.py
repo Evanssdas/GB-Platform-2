@@ -215,7 +215,9 @@ def _actual_persistence(actuals: pd.DataFrame, revision: str) -> pd.Series:
         "delivery_time_utc", keep="last"
     )
     lookup = revision_rows.set_index("delivery_time_utc")["actual_price"].astype(float)
-    source_times = revision_rows["delivery_time_utc"] - pd.Timedelta(days=1)
+    # A full D-1 price profile is not observable at a D-1 day-ahead issue time.
+    # Use D-2 same-half-hour persistence as an operationally fair benchmark.
+    source_times = revision_rows["delivery_time_utc"] - pd.Timedelta(days=2)
     values = lookup.reindex(source_times).to_numpy()
     return pd.Series(values, index=revision_rows["delivery_time_utc"].to_numpy())
 

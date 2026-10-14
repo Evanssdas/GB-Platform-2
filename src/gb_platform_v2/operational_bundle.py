@@ -124,7 +124,15 @@ def prepare_operational_bundle(
             ),
         }
 
-    complete_errors = operational_errors.dropna(subset=targets, how="any")
+    price_error_column = str(metadata.get("price_error_column", "price_error_gbp_mwh"))
+    if price_error_column in model_errors:
+        operational_errors[price_error_column] = model_errors[price_error_column].reindex(frame.index)
+
+    required_error_columns = list(targets)
+    if price_error_column in operational_errors:
+        required_error_columns.append(price_error_column)
+
+    complete_errors = operational_errors.dropna(subset=required_error_columns, how="any")
     if len(complete_errors) < 500:
         raise ValueError(
             f"Operational error history is too short: {len(complete_errors)} complete rows"
@@ -135,6 +143,9 @@ def prepare_operational_bundle(
     metadata["operational_bundle_ready"] = True
     metadata["operational_component_strategy"] = strategy
     metadata["component_error_file"] = error_path.name
+    metadata["price_error_column"] = (
+        price_error_column if price_error_column in complete_errors else None
+    )
     metadata["operational_fallback_policy"] = {
         "eligible_targets": sorted(OPERATIONAL_FALLBACK_TARGETS),
         "lag_hours": int(FALLBACK_LAG / pd.Timedelta(hours=1)),
@@ -151,6 +162,7 @@ def prepare_operational_bundle(
         "component_strategy": strategy,
         "operational_error_rows": int(len(complete_errors)),
         "component_error_file": error_path.name,
+        "price_error_column": metadata.get("price_error_column"),
         "ready_for_shadow_forecasting": True,
         "ready_for_operational_deployment": False,
     }

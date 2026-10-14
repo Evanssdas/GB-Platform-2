@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from .calibration import fit_live_calibration
 from .data.elexon import ElexonClient
 from .data.parsers import parse_elexon_mid
-from .features import add_cyclical_time_features, add_weather_features
+from .features import add_cyclical_time_features, add_market_regime_features, add_weather_features
 from .live_store import append_actuals, append_forecasts, grade_forecasts
 from .pipeline import forecast_platform
 
@@ -21,7 +22,8 @@ def _load_feature_frame(path: str | Path) -> pd.DataFrame:
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     frame = frame.set_index("timestamp", drop=False).sort_index()
     frame = add_cyclical_time_features(frame)
-    return add_weather_features(frame)
+    frame = add_weather_features(frame)
+    return add_market_regime_features(frame)
 
 
 def _existing_forecast_covers_delivery_day(
@@ -74,6 +76,9 @@ def run_and_log_forecast(
     issue_time_utc: str | pd.Timestamp,
     scenarios: int = 1000,
     reuse_existing_day: bool = False,
+    scores_path: str | Path | None = None,
+    calibration_source_model_version: str | None = None,
+    calibration_lookback_days: int = 7,
 ) -> dict:
     """Run the frozen model and append immutable probabilistic forecasts.
 
@@ -83,16 +88,41 @@ def run_and_log_forecast(
     and plots after a partially failed workflow run.
     """
     features = _load_feature_frame(feature_path)
-    report = forecast_platform(features, model_dir, output_dir, scenarios)
+    issue = pd.Timestamp(issue_time_utc)
+    issue = issue.tz_localize("UTC") if issue.tzinfo is None else issue.tz_convert("UTC")
+    calibration = (
+        fit_live_calibration(
+            scores_path,
+            forecasts_path,
+            issue,
+            source_model_version=calibration_source_model_version,
+            lookback_days=calibration_lookback_days,
+        )
+        if scores_path is not None
+        else {"enabled": False, "reason": "not_requested"}
+    )
+    report = forecast_platform(
+        features,
+        model_dir,
+        output_dir,
+        scenarios,
+        calibration=calibration,
+    )
     price_path = Path(output_dir) / "half_hourly_price_forecast.csv"
     prices = pd.read_csv(price_path, index_col=0)
     prices.index = pd.to_datetime(prices.index, utc=True)
     prices = prices.rename_axis("delivery_time_utc").reset_index()
     prices["model_version"] = model_version
-    issue = pd.Timestamp(issue_time_utc)
-    issue = issue.tz_localize("UTC") if issue.tzinfo is None else issue.tz_convert("UTC")
     if (prices["delivery_time_utc"] <= issue).any():
         raise ValueError("Forecast delivery periods must all be later than issue time")
+    minimum_lead_hours = (
+        prices["delivery_time_utc"].min() - issue
+    ) / pd.Timedelta(hours=1)
+    if float(minimum_lead_hours) < 8.0:
+        raise ValueError(
+            "Day-ahead shadow forecast requires at least 8 hours lead to the first "
+            f"delivery period; observed {float(minimum_lead_hours):.2f} hours"
+        )
     prices["issue_time_utc"] = issue
 
     reused = False
