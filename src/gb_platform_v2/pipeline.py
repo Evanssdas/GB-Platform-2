@@ -196,13 +196,24 @@ def train_platform(
         dict.fromkeys(column for column in price_features if column in price_training.columns)
     )
 
-    metrics["price_gbp_mwh"] = chronological_holdout_score(
-        price_training,
-        price_features,
-        "price_gbp_mwh",
-        holdout_rows,
-        transform="arcsinh",
-        scale=50.0,
+    price_variant_metrics = {}
+    for transform in ("arcsinh", "identity"):
+        price_variant_metrics[transform] = chronological_holdout_score(
+            price_training,
+            price_features,
+            "price_gbp_mwh",
+            holdout_rows,
+            transform=transform,
+            scale=50.0,
+        )
+    selected_price_transform = min(
+        price_variant_metrics,
+        key=lambda name: price_variant_metrics[name]["model_mae"],
+    )
+    metrics["price_gbp_mwh"] = dict(
+        price_variant_metrics[selected_price_transform],
+        selected_transform=selected_price_transform,
+        variant_metrics=price_variant_metrics,
     )
 
     # Keep an honest out-of-fold price residual alongside the component errors.
@@ -214,7 +225,7 @@ def train_platform(
         price_features,
         "price_gbp_mwh",
         n_splits=time_series_splits,
-        transform="arcsinh",
+        transform=selected_price_transform,
         scale=50.0,
     )
     component_errors["price_error_gbp_mwh"] = (
@@ -225,7 +236,7 @@ def train_platform(
         price_training,
         price_features,
         "price_gbp_mwh",
-        transform="arcsinh",
+        transform=selected_price_transform,
         scale=50.0,
     ).save(model_dir / "price_gbp_mwh.joblib")
 
@@ -254,6 +265,8 @@ def train_platform(
             "price_features": price_features,
             "metrics": metrics,
             "stacking": "expanding_window_out_of_fold",
+            "price_transform_selected": selected_price_transform,
+            "price_transform_candidates": price_variant_metrics,
             "price_error_column": "price_error_gbp_mwh",
             "price_error_definition": "actual APXMIDP minus out-of-fold price forecast",
             "time_series_splits": time_series_splits,
