@@ -54,6 +54,35 @@ def bootstrap_error_scenarios(
     return output
 
 
+def calibrate_scenario_result(
+    result: ScenarioResult,
+    bias_correction_gbp_mwh: float = 0.0,
+    dispersion_scale: float = 1.0,
+) -> ScenarioResult:
+    """Shift the scenario centre and rescale dispersion around each period median."""
+    bias = float(bias_correction_gbp_mwh)
+    scale = max(1.0, float(dispersion_scale))
+    raw_paths = np.asarray(result.price_paths, dtype=float)
+    raw_median = np.percentile(raw_paths, 50, axis=0)
+    adjusted_center = raw_median + bias
+    adjusted_paths = adjusted_center[None, :] + scale * (
+        raw_paths - raw_median[None, :]
+    )
+    quantiles = pd.DataFrame(
+        {
+            "p10": np.percentile(adjusted_paths, 10, axis=0),
+            "p50": np.percentile(adjusted_paths, 50, axis=0),
+            "p90": np.percentile(adjusted_paths, 90, axis=0),
+        },
+        index=result.quantiles.index,
+    )
+    negative_probability = pd.Series(
+        (adjusted_paths < 0).mean(axis=0),
+        index=result.negative_probability.index,
+    )
+    return ScenarioResult(adjusted_paths, quantiles, negative_probability)
+
+
 def run_price_monte_carlo(
     point_features: pd.DataFrame,
     component_scenarios: dict[str, np.ndarray],
