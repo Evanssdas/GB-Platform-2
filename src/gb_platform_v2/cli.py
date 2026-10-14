@@ -17,7 +17,12 @@ from .collection import (
 )
 from .data.neso import NESO_RESOURCES
 from .dataset_builder import build_half_hourly_dataset
-from .features import add_cyclical_time_features, add_system_balance_features, add_weather_features
+from .features import (
+    add_cyclical_time_features,
+    add_market_regime_features,
+    add_system_balance_features,
+    add_weather_features,
+)
 from .live import collect_and_append_price_actuals, run_and_log_forecast
 from .live_store import grade_forecasts
 from .pipeline import forecast_platform, train_platform
@@ -36,6 +41,7 @@ def _load_frame(path: str) -> pd.DataFrame:
 def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
     out = add_cyclical_time_features(frame)
     out = add_weather_features(out)
+    out = add_market_regime_features(out)
     balance_columns = {
         "demand_mw",
         "embedded_wind_mw",
