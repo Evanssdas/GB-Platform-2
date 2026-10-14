@@ -33,6 +33,39 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_market_regime_features(
+    df: pd.DataFrame,
+    ccgt_efficiency: float = 0.50,
+    ccgt_emissions_tco2_per_mwh: float = 0.36,
+    ccgt_vom_gbp_mwh: float = 4.0,
+) -> pd.DataFrame:
+    """Add optional thermal marginal-cost features when market inputs are supplied.
+
+    Expected optional columns:
+    - gas_price_gbp_mwh_th
+    - eua_gbp_tco2
+
+    The function is deliberately a no-op when those inputs are unavailable, so
+    existing datasets remain backward compatible.
+    """
+    out = df.copy()
+    if "gas_price_gbp_mwh_th" in out:
+        gas = pd.to_numeric(out["gas_price_gbp_mwh_th"], errors="coerce")
+        out["ccgt_fuel_cost_gbp_mwh"] = gas / float(ccgt_efficiency)
+    if "eua_gbp_tco2" in out:
+        carbon = pd.to_numeric(out["eua_gbp_tco2"], errors="coerce")
+        out["ccgt_carbon_cost_gbp_mwh"] = (
+            carbon * float(ccgt_emissions_tco2_per_mwh)
+        )
+    if {"ccgt_fuel_cost_gbp_mwh", "ccgt_carbon_cost_gbp_mwh"}.issubset(out.columns):
+        out["ccgt_srmc_gbp_mwh"] = (
+            out["ccgt_fuel_cost_gbp_mwh"]
+            + out["ccgt_carbon_cost_gbp_mwh"]
+            + float(ccgt_vom_gbp_mwh)
+        )
+    return out
+
+
 def add_lag_features(
     df: pd.DataFrame,
     columns: list[str],
