@@ -154,6 +154,7 @@ jobs:
             --scores live/scores.csv \
             --calibration-source-model-version "$MODEL_VERSION" \
             --calibration-lookback-days 7 \
+            --component-forecasts live/component_forecasts.csv \
             --reuse-existing-day 2>&1 | tee outputs/shadow/live_forecast.log
           test -s outputs/shadow/forecast/half_hourly_price_forecast.csv
           test -s outputs/shadow/forecast/half_hourly_system_forecast.csv
@@ -167,6 +168,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add live/forecasts.csv
+          [ ! -f live/component_forecasts.csv ] || git add live/component_forecasts.csv
           if ! git diff --cached --quiet; then
             git commit -m "Checkpoint shadow forecast ${{ steps.dates.outputs.delivery_date }}"
             git pull --rebase origin main
@@ -275,6 +277,7 @@ jobs:
             data/processed/shadow_features.parquet
             outputs/shadow
             live/forecasts.csv
+            live/component_forecasts.csv
             live/risk_log.csv
             live/reports/${{ steps.dates.outputs.delivery_date }}
             logs
