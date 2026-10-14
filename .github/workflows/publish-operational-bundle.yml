@@ -1,4 +1,4 @@
-name: Publish operational core bundle V1
+name: Publish operational core bundle
 run-name: Publish operational core from candidate ${{ inputs.candidate_run_id }}
 
 on:
@@ -11,18 +11,22 @@ on:
       release_tag:
         description: Immutable operational release tag
         required: true
-        default: operational-core-v1
+        default: operational-core-v2
       model_version:
         description: Model version written to shadow forecasts
         required: true
-        default: core-12m-operational-v1
+        default: core-regime-operational-v2
+      release_asset:
+        description: Release zip asset name
+        required: true
+        default: operational-core-v2.zip
 
 permissions:
   contents: write
   actions: read
 
 concurrency:
-  group: publish-operational-core-v1
+  group: publish-operational-core
   cancel-in-progress: false
 
 jobs:
@@ -95,8 +99,9 @@ jobs:
           cp candidate/outputs/production_candidate/dataset_summary.json release/metadata/
           cp candidate/outputs/production_candidate/history_merge_summary.json release/metadata/
           printf '%s\n' '${{ github.sha }}' > release/metadata/repository_commit.txt
-          (cd release && zip -qr ../operational-core-v1.zip .)
-          sha256sum operational-core-v1.zip | tee operational-core-v1.zip.sha256
+          ASSET="${{ inputs.release_asset }}"
+          (cd release && zip -qr "../$ASSET" .)
+          sha256sum "$ASSET" | tee "$ASSET.sha256"
 
       - name: Create or update immutable shadow release
         env:
@@ -117,6 +122,6 @@ jobs:
         with:
           name: operational-core-publication-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
-            operational-core-v1.zip.sha256
+            ${{ inputs.release_asset }}.sha256
             candidate/outputs/production_candidate/operational_bundle.json
           retention-days: 90
