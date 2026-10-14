@@ -53,6 +53,8 @@ DERIVED_TARGET_COLUMNS = {
 }
 PRICE_LAYER_PREFIXES = (
     "price_d",
+    "gas_price_",
+    "eua_",
     "ccgt_",
 )
 PRICE_LAYER_SUFFIXES = (
