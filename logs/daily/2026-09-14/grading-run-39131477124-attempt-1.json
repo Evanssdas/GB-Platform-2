@@ -1,0 +1,74 @@
+{
+  "workflow_revision": "review-grading-v1",
+  "delivery_date": "2026-09-14",
+  "model_version": "core-12m-operational-v1",
+  "actual_revision": "initial",
+  "github_run_id": "39131477124",
+  "github_run_attempt": "1",
+  "grading_metrics": {
+    "actual_periods": 48,
+    "graded_periods": 48,
+    "model_mae_gbp_mwh": 97.02997196131264,
+    "model_rmse_gbp_mwh": 98.39794222640258,
+    "model_bias_gbp_mwh": -97.02997196131264,
+    "persistence_mae_gbp_mwh": 81.55083333333334,
+    "improvement_percent": -18.980969286615867,
+    "p10_p90_coverage": 0.0,
+    "actual_negative_periods": 0
+  },
+  "deployment_gate": {
+    "workflow_revision": "deployment-gate-v1",
+    "deployment_ready": false,
+    "mode": "shadow_only",
+    "metrics": {
+      "model_version": "core-12m-operational-v1",
+      "graded_periods": 3552,
+      "comparable_persistence_periods": 3552,
+      "graded_delivery_days": 74,
+      "first_delivery_date": "2026-08-01",
+      "last_delivery_date": "2026-10-15",
+      "model_mae_gbp_mwh": 67.06521794031059,
+      "persistence_mae_gbp_mwh": 43.867514076576576,
+      "improvement_percent": -52.88128208778674,
+      "p10_p90_coverage": 0.05884009009009009,
+      "minimum_lead_hours": 1.4666666666666666
+    },
+    "gates": {
+      "minimum_shadow_days": {
+        "passed": true,
+        "required": 30,
+        "observed": 74
+      },
+      "consecutive_delivery_days": {
+        "passed": false,
+        "missing_dates": [
+          "2026-08-02",
+          "2026-10-03"
+        ]
+      },
+      "complete_periods": {
+        "passed": true,
+        "missing_periods": {}
+      },
+      "pre_delivery_issue_time": {
+        "passed": false,
+        "required_hours": 8.0,
+        "observed_minimum_hours": 1.4666666666666666
+      },
+      "beats_persistence": {
+        "passed": false,
+        "required_improvement_percent": 5.0,
+        "observed_improvement_percent": -52.88128208778674
+      },
+      "interval_coverage": {
+        "passed": false,
+        "required_range": [
+          0.7,
+          0.9
+        ],
+        "observed": 0.05884009009009009
+      }
+    },
+    "warning": "Passing this software gate supports controlled human review; it is not financial advice or an autonomous trading authorisation."
+  }
+}
