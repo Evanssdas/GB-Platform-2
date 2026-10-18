@@ -1,0 +1,86 @@
+{
+  "workflow_revision": "review-forecast-v1",
+  "delivery_date": "2026-10-19",
+  "model_version": "core-12m-operational-v1",
+  "issue_time_utc": "2026-10-18T14:53:52Z",
+  "github_run_id": "39138029401",
+  "github_run_attempt": "1",
+  "monte_carlo_scenarios": 1000,
+  "feature_summary": {
+    "workflow_revision": "shadow-features-v2",
+    "delivery_date_local": "2026-10-19",
+    "issue_time_utc": "2026-10-18T14:53:52.445575+00:00",
+    "period_count": 48,
+    "expected_period_count": 48,
+    "timestamp_min": "2026-10-18T23:00:00+00:00",
+    "timestamp_max": "2026-10-19T22:30:00+00:00",
+    "trained_feature_count": 64,
+    "component_feature_count": 64,
+    "optional_market_features": [],
+    "optional_market_features_missing_live": [],
+    "fallback_targets": [
+      "demand_mw",
+      "nuclear_mw"
+    ],
+    "weather_source": "Open-Meteo current forecast retrieved over complete UTC settlement span",
+    "fallback_source": "Elexon observed profile at exact UTC timestamp minus 168 hours",
+    "price_anchor_features": [],
+    "price_anchor_source": "Elexon APXMIDP at exact UTC timestamp minus 48 and 168 hours",
+    "leakage_gate": "passed"
+  },
+  "daily_report": {
+    "period_count": 48,
+    "p50_daily_min_gbp_mwh": 167.28518789055866,
+    "p50_daily_max_gbp_mwh": 226.2358130191323,
+    "p50_daily_mean_gbp_mwh": 185.69341569941935,
+    "probability_any_negative_period": 0.001,
+    "maximum_period_negative_probability": 0.001,
+    "distribution_daily_min_p10": 58.254713500704035,
+    "distribution_daily_min_p50": 82.45761116513474,
+    "distribution_daily_min_p90": 125.49631927446434,
+    "distribution_daily_max_p10": 238.93242210785553,
+    "distribution_daily_max_p50": 267.93266249409055,
+    "distribution_daily_max_p90": 301.81469137942,
+    "model_profile": "core_without_battery",
+    "operational_bundle_ready": true,
+    "component_sources": {
+      "demand_mw": "fallback_d7",
+      "embedded_wind_mw": "model",
+      "embedded_solar_mw": "model",
+      "transmission_wind_mw": "model",
+      "nuclear_mw": "fallback_d7",
+      "net_import_mw": "model",
+      "inertia_gvas": "model"
+    },
+    "component_point_values_clipped_at_zero": {
+      "demand_mw": 0,
+      "embedded_wind_mw": 0,
+      "embedded_solar_mw": 3,
+      "transmission_wind_mw": 0,
+      "nuclear_mw": 0,
+      "net_import_mw": 0,
+      "inertia_gvas": 0
+    },
+    "component_error_file": "operational_component_errors.parquet",
+    "live_calibration": {
+      "enabled": true,
+      "reason": "rolling_past_grading",
+      "bias_correction_gbp_mwh": 93.07857153436206,
+      "dispersion_scale": 3.0263235163038984,
+      "history_rows": 208,
+      "lookback_days": 7,
+      "target_coverage": 0.8,
+      "source_model_version": "core-12m-operational-v1",
+      "lookback_raw_coverage": 0.0,
+      "lookback_adjusted_coverage": 0.7980769230769231
+    },
+    "risk": {
+      "scenario_var": 21879.533972079316,
+      "expected_shortfall": 25451.265512684924,
+      "worst_loss": 34120.80503966145,
+      "best_profit": 22583.98949981524
+    }
+  },
+  "price_forecast_rows": 48,
+  "system_forecast_rows": 48
+}
