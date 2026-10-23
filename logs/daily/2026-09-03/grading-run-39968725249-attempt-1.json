@@ -1,0 +1,76 @@
+{
+  "workflow_revision": "review-grading-v1",
+  "delivery_date": "2026-09-03",
+  "model_version": "core-12m-operational-v1",
+  "actual_revision": "initial",
+  "github_run_id": "39968725249",
+  "github_run_attempt": "1",
+  "grading_metrics": {
+    "actual_periods": 48,
+    "graded_periods": 48,
+    "model_mae_gbp_mwh": 69.90880964287123,
+    "model_rmse_gbp_mwh": 78.18448274724759,
+    "model_bias_gbp_mwh": -58.683536980731866,
+    "persistence_mae_gbp_mwh": 13.056041666666667,
+    "improvement_percent": -435.451796399786,
+    "p10_p90_coverage": 0.10416666666666667,
+    "actual_negative_periods": 0
+  },
+  "deployment_gate": {
+    "workflow_revision": "deployment-gate-v1",
+    "deployment_ready": false,
+    "mode": "shadow_only",
+    "metrics": {
+      "model_version": "core-12m-operational-v1",
+      "graded_periods": 3648,
+      "comparable_persistence_periods": 3648,
+      "graded_delivery_days": 76,
+      "first_delivery_date": "2026-08-01",
+      "last_delivery_date": "2026-10-19",
+      "model_mae_gbp_mwh": 65.63001771565689,
+      "persistence_mae_gbp_mwh": 43.645704495614034,
+      "improvement_percent": -50.369935539136655,
+      "p10_p90_coverage": 0.08141447368421052,
+      "minimum_lead_hours": 1.4666666666666666
+    },
+    "gates": {
+      "minimum_shadow_days": {
+        "passed": true,
+        "required": 30,
+        "observed": 76
+      },
+      "consecutive_delivery_days": {
+        "passed": false,
+        "missing_dates": [
+          "2026-08-02",
+          "2026-10-03",
+          "2026-10-16",
+          "2026-10-17"
+        ]
+      },
+      "complete_periods": {
+        "passed": true,
+        "missing_periods": {}
+      },
+      "pre_delivery_issue_time": {
+        "passed": false,
+        "required_hours": 8.0,
+        "observed_minimum_hours": 1.4666666666666666
+      },
+      "beats_persistence": {
+        "passed": false,
+        "required_improvement_percent": 5.0,
+        "observed_improvement_percent": -50.369935539136655
+      },
+      "interval_coverage": {
+        "passed": false,
+        "required_range": [
+          0.7,
+          0.9
+        ],
+        "observed": 0.08141447368421052
+      }
+    },
+    "warning": "Passing this software gate supports controlled human review; it is not financial advice or an autonomous trading authorisation."
+  }
+}
