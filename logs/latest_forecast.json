@@ -1,19 +1,19 @@
 {
   "workflow_revision": "review-forecast-v1",
-  "delivery_date": "2026-10-19",
+  "delivery_date": "2026-10-25",
   "model_version": "core-12m-operational-v1",
-  "issue_time_utc": "2026-10-18T14:53:52Z",
-  "github_run_id": "39138029401",
+  "issue_time_utc": "2026-10-24T14:55:11Z",
+  "github_run_id": "40104613121",
   "github_run_attempt": "1",
   "monte_carlo_scenarios": 1000,
   "feature_summary": {
     "workflow_revision": "shadow-features-v2",
-    "delivery_date_local": "2026-10-19",
-    "issue_time_utc": "2026-10-18T14:53:52.445575+00:00",
-    "period_count": 48,
-    "expected_period_count": 48,
-    "timestamp_min": "2026-10-18T23:00:00+00:00",
-    "timestamp_max": "2026-10-19T22:30:00+00:00",
+    "delivery_date_local": "2026-10-25",
+    "issue_time_utc": "2026-10-24T14:55:11.811146+00:00",
+    "period_count": 50,
+    "expected_period_count": 50,
+    "timestamp_min": "2026-10-24T23:00:00+00:00",
+    "timestamp_max": "2026-10-25T23:30:00+00:00",
     "trained_feature_count": 64,
     "component_feature_count": 64,
     "optional_market_features": [],
@@ -29,18 +29,18 @@
     "leakage_gate": "passed"
   },
   "daily_report": {
-    "period_count": 48,
-    "p50_daily_min_gbp_mwh": 167.28518789055866,
-    "p50_daily_max_gbp_mwh": 226.2358130191323,
-    "p50_daily_mean_gbp_mwh": 185.69341569941935,
-    "probability_any_negative_period": 0.001,
-    "maximum_period_negative_probability": 0.001,
-    "distribution_daily_min_p10": 58.254713500704035,
-    "distribution_daily_min_p50": 82.45761116513474,
-    "distribution_daily_min_p90": 125.49631927446434,
-    "distribution_daily_max_p10": 238.93242210785553,
-    "distribution_daily_max_p50": 267.93266249409055,
-    "distribution_daily_max_p90": 301.81469137942,
+    "period_count": 50,
+    "p50_daily_min_gbp_mwh": 1.2856638959829674,
+    "p50_daily_max_gbp_mwh": 61.850510757255904,
+    "p50_daily_mean_gbp_mwh": 18.345051257472836,
+    "probability_any_negative_period": 0.99,
+    "maximum_period_negative_probability": 0.403,
+    "distribution_daily_min_p10": -9.370213029175462,
+    "distribution_daily_min_p50": -5.560891082404935,
+    "distribution_daily_min_p90": -2.3153544548150786,
+    "distribution_daily_max_p10": 59.874055754189925,
+    "distribution_daily_max_p50": 68.71284276311661,
+    "distribution_daily_max_p90": 76.67500899050147,
     "model_profile": "core_without_battery",
     "operational_bundle_ready": true,
     "component_sources": {
@@ -55,7 +55,7 @@
     "component_point_values_clipped_at_zero": {
       "demand_mw": 0,
       "embedded_wind_mw": 0,
-      "embedded_solar_mw": 3,
+      "embedded_solar_mw": 11,
       "transmission_wind_mw": 0,
       "nuclear_mw": 0,
       "net_import_mw": 0,
@@ -65,22 +65,22 @@
     "live_calibration": {
       "enabled": true,
       "reason": "rolling_past_grading",
-      "bias_correction_gbp_mwh": 93.07857153436206,
-      "dispersion_scale": 3.0263235163038984,
-      "history_rows": 208,
+      "bias_correction_gbp_mwh": -2.9977407037984847,
+      "dispersion_scale": 1.0,
+      "history_rows": 96,
       "lookback_days": 7,
       "target_coverage": 0.8,
       "source_model_version": "core-12m-operational-v1",
-      "lookback_raw_coverage": 0.0,
-      "lookback_adjusted_coverage": 0.7980769230769231
+      "lookback_raw_coverage": 0.9166666666666666,
+      "lookback_adjusted_coverage": 0.9166666666666666
     },
     "risk": {
-      "scenario_var": 21879.533972079316,
-      "expected_shortfall": 25451.265512684924,
-      "worst_loss": 34120.80503966145,
-      "best_profit": 22583.98949981524
+      "scenario_var": 7589.194865546949,
+      "expected_shortfall": 9369.59552475393,
+      "worst_loss": 15914.79254000779,
+      "best_profit": 11668.364109322882
     }
   },
-  "price_forecast_rows": 48,
-  "system_forecast_rows": 48
+  "price_forecast_rows": 50,
+  "system_forecast_rows": 50
 }
