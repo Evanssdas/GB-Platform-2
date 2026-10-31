@@ -27,7 +27,12 @@ WEATHER_VARIABLES = [
     "cloud_cover",
 ]
 SINGLE_RUN_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
+PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 WEATHER_MODEL = "ecmwf_ifs"
+
+
+class ExactRunUnavailable(RuntimeError):
+    """Raised when Open-Meteo does not expose the requested archived run."""
 
 
 def _delivery_days(start: str, end: str) -> list[pd.Timestamp]:
@@ -60,6 +65,17 @@ def _payloads_for_sites(
             response.raise_for_status()
             payload = response.json()
             break
+        except requests.HTTPError as exc:
+            last_error = exc
+            status = getattr(exc.response, "status_code", None)
+            # A 400 from Single Runs generally means that exact archived model
+            # initialisation is not available. Retrying the same request cannot
+            # repair that, so fall back explicitly to fixed-lead Previous Runs.
+            if status == 400:
+                raise ExactRunUnavailable(str(exc)) from exc
+            if attempt == 5:
+                raise
+            time.sleep(min(30.0, 2.0 ** attempt))
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
             if attempt == 5:
@@ -74,6 +90,57 @@ def _payloads_for_sites(
         )
     return payloads
 
+
+
+
+def _previous_day1_weather_day(
+    sites: list[dict],
+    delivery: str | pd.Timestamp,
+    session: requests.Session,
+) -> pd.DataFrame:
+    """Return fixed 24-hour-lead ECMWF weather when an exact run is unavailable."""
+    day = pd.Timestamp(delivery).tz_localize(None).normalize()
+    periods = settlement_periods_for_day(day).tz_convert("UTC")
+    left = periods.min()
+    right = periods.max() + pd.Timedelta(minutes=30)
+    api_start = left.floor("D").strftime("%Y-%m-%d")
+    api_end = right.floor("D").strftime("%Y-%m-%d")
+    variables = [f"{variable}_previous_day1" for variable in WEATHER_VARIABLES]
+    params = {
+        "latitude": ",".join(str(float(site["latitude"])) for site in sites),
+        "longitude": ",".join(str(float(site["longitude"])) for site in sites),
+        "hourly": ",".join(variables),
+        "start_date": api_start,
+        "end_date": api_end,
+        "timezone": "UTC",
+        "models": WEATHER_MODEL,
+    }
+    response = session.get(PREVIOUS_RUNS_URL, params=params, timeout=(30, 180))
+    response.raise_for_status()
+    payload = response.json()
+    payloads = payload if isinstance(payload, list) else [payload]
+    if len(payloads) != len(sites):
+        raise ValueError(
+            f"Previous Runs returned {len(payloads)} locations for {len(sites)} sites"
+        )
+    merged: pd.DataFrame | None = None
+    for site, site_payload in zip(sites, payloads):
+        frame = parse_open_meteo_hourly(site_payload, str(site["name"]))
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        frame = frame.loc[
+            frame["timestamp"].between(left, right, inclusive="both")
+        ].copy()
+        merged = (
+            frame
+            if merged is None
+            else merged.merge(frame, on="timestamp", how="outer", validate="one_to_one")
+        )
+    if merged is None or merged.empty:
+        raise ValueError(f"No Previous Runs weather for delivery date {day.date()}")
+    merged["weather_run_utc"] = pd.NaT
+    merged["weather_model"] = WEATHER_MODEL
+    merged["weather_vintage_source"] = "previous_runs_fixed_lead_day1"
+    return merged.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
 
 
 def exact_issue_weather_day(
@@ -103,7 +170,10 @@ def exact_issue_weather_day(
     periods = settlement_periods_for_day(day).tz_convert("UTC")
     left = periods.min()
     right = periods.max() + pd.Timedelta(minutes=30)
-    payloads = _payloads_for_sites(sites, run_utc, client)
+    try:
+        payloads = _payloads_for_sites(sites, run_utc, client)
+    except ExactRunUnavailable:
+        return _previous_day1_weather_day(sites, day, client)
 
     merged: pd.DataFrame | None = None
     for site, payload in zip(sites, payloads):
@@ -126,6 +196,7 @@ def exact_issue_weather_day(
         raise ValueError(f"No exact-run weather for delivery date {day.date()}")
     merged["weather_run_utc"] = run_utc
     merged["weather_model"] = WEATHER_MODEL
+    merged["weather_vintage_source"] = "single_run_d1_00utc"
     return merged.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
 
 def collect_exact_issue_weather(
@@ -161,6 +232,24 @@ def collect_exact_issue_weather(
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
     combined.to_parquet(target, index=False)
+    source_counts = (
+        combined[["timestamp", "weather_vintage_source"]]
+        .drop_duplicates("timestamp")["weather_vintage_source"]
+        .value_counts()
+        .to_dict()
+    )
+    metadata = {
+        "requested_rule": "D-1 00:00 UTC ECMWF IFS HRES Single Run",
+        "fallback_rule": "ECMWF IFS fixed 24-hour lead Previous Runs (_previous_day1)",
+        "source_row_counts": {str(key): int(value) for key, value in source_counts.items()},
+        "training_live_equivalence": (
+            "Exact Single Runs preserve model initialisation where archived; fixed-lead "
+            "Previous Runs are used only when the exact archived run is unavailable."
+        ),
+    }
+    target.with_suffix(".vintage.json").write_text(
+        __import__("json").dumps(metadata, indent=2), encoding="utf-8"
+    )
     return target
 
 
@@ -182,8 +271,9 @@ def main() -> None:
     print({
         "output": str(path),
         "model": WEATHER_MODEL,
-        "run_rule": "D-1 00:00 UTC ECMWF IFS HRES",
-        "issue_time_compatibility": "available before D-1 13:00 Europe/London",
+        "run_rule": "D-1 00:00 UTC ECMWF IFS HRES where archived",
+        "fallback_rule": "fixed 24-hour lead Previous Runs where exact run unavailable",
+        "issue_time_compatibility": "both sources represent information available before D-1 13:00 Europe/London",
     })
 
 

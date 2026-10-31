@@ -58,13 +58,12 @@ jobs:
           --output data/parsed/elexon
           --chunk-days 7
 
-      - name: Collect NESO embedded and inertia in bounded chunks
+      - name: Collect NESO embedded forecasts in bounded chunks
         shell: bash
         env:
           START_DATE: ${{ matrix.start }}
           END_DATE: ${{ matrix.end }}
           EMBEDDED: ${{ matrix.embedded }}
-          INERTIA: ${{ matrix.inertia }}
         run: |
           timeout 70m python - <<'PY'
           import os
@@ -72,53 +71,45 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
-          def collect(preset: str, destination: str) -> None:
-              start = pd.Timestamp(os.environ["START_DATE"])
-              end = pd.Timestamp(os.environ["END_DATE"])
-              frames = []
-              cursor = start
-              chunk = 0
-              root = Path(destination).parent / (Path(destination).stem + "_chunks")
-              root.mkdir(parents=True, exist_ok=True)
-              while cursor < end:
-                  right = min(cursor + pd.Timedelta(days=31), end)
-                  path = root / f"chunk_{chunk:03d}.parquet"
-                  subprocess.run(
-                      [
-                          "gb-v2", "collect-neso-preset",
-                          "--name", preset,
-                          "--start", cursor.strftime("%Y-%m-%d"),
-                          "--end", right.strftime("%Y-%m-%d"),
-                          "--output", str(path),
-                      ],
-                      check=True,
-                      timeout=20 * 60,
-                  )
-                  frames.append(pd.read_parquet(path))
-                  cursor = right
-                  chunk += 1
-              combined = pd.concat(frames, ignore_index=True)
-              if "timestamp" in combined:
-                  combined["timestamp"] = pd.to_datetime(
-                      combined["timestamp"], utc=True, errors="coerce"
-                  )
-              if "published_at_utc" in combined:
-                  combined["published_at_utc"] = pd.to_datetime(
-                      combined["published_at_utc"], utc=True, errors="coerce"
-                  )
-                  subset = ["timestamp", "published_at_utc"]
-              else:
-                  subset = ["timestamp"]
-              combined = (
-                  combined.sort_values(subset)
-                  .drop_duplicates(subset, keep="last")
-                  .reset_index(drop=True)
+          start = pd.Timestamp(os.environ["START_DATE"])
+          end = pd.Timestamp(os.environ["END_DATE"])
+          frames = []
+          cursor = start
+          chunk = 0
+          root = Path("data/parsed/neso/embedded_chunks")
+          root.mkdir(parents=True, exist_ok=True)
+          while cursor < end:
+              right = min(cursor + pd.Timedelta(days=31), end)
+              path = root / f"chunk_{chunk:03d}.parquet"
+              subprocess.run(
+                  [
+                      "gb-v2", "collect-neso-preset",
+                      "--name", os.environ["EMBEDDED"],
+                      "--start", cursor.strftime("%Y-%m-%d"),
+                      "--end", right.strftime("%Y-%m-%d"),
+                      "--output", str(path),
+                  ],
+                  check=True,
+                  timeout=20 * 60,
               )
-              Path(destination).parent.mkdir(parents=True, exist_ok=True)
-              combined.to_parquet(destination, index=False)
+              frames.append(pd.read_parquet(path))
+              cursor = right
+              chunk += 1
 
-          collect(os.environ["EMBEDDED"], "data/parsed/neso/embedded.parquet")
-          collect(os.environ["INERTIA"], "data/parsed/neso/inertia.parquet")
+          combined = pd.concat(frames, ignore_index=True)
+          combined["timestamp"] = pd.to_datetime(
+              combined["timestamp"], utc=True, errors="coerce"
+          )
+          combined["published_at_utc"] = pd.to_datetime(
+              combined["published_at_utc"], utc=True, errors="coerce"
+          )
+          combined = (
+              combined.sort_values(["timestamp", "published_at_utc"])
+              .drop_duplicates(["timestamp", "published_at_utc"], keep="last")
+              .reset_index(drop=True)
+          )
+          Path("data/parsed/neso").mkdir(parents=True, exist_ok=True)
+          combined.to_parquet("data/parsed/neso/embedded.parquet", index=False)
           PY
 
       - name: Collect exact D-1 ECMWF weather vintages
@@ -133,7 +124,6 @@ jobs:
           START_DATE: ${{ matrix.start }}
           END_DATE: ${{ matrix.end }}
           EMBEDDED: ${{ matrix.embedded }}
-          INERTIA: ${{ matrix.inertia }}
           KEY: ${{ matrix.key }}
         run: |
           python -m gb_platform_v2.data_audit             --input data/parsed --output data/parsed/data_audit.json
@@ -149,8 +139,12 @@ jobs:
               "start_date_inclusive": os.environ["START_DATE"],
               "end_date_exclusive": os.environ["END_DATE"],
               "embedded_preset": os.environ["EMBEDDED"],
-              "inertia_preset": os.environ["INERTIA"],
-              "weather_vintage": "Open-Meteo Single Runs ECMWF IFS HRES D-1 00:00 UTC",
+              "inertia_preset": os.environ.get("INERTIA"),
+              "inertia_status": "excluded_incomplete_public_coverage",
+              "weather_vintage": (
+                  "Open-Meteo ECMWF IFS: exact D-1 00:00 UTC Single Runs where "
+                  "archived; fixed 24-hour-lead Previous Runs fallback otherwise"
+              ),
               "issue_time_local": "13:00 Europe/London",
           }
           status = {
@@ -158,7 +152,7 @@ jobs:
               "install_test": "success",
               "elexon_core": "success",
               "neso_embedded": "success",
-              "neso_inertia": "success",
+              "neso_inertia": "excluded_incomplete_public_coverage",
               "weather_demand": "success",
               "weather_wind": "success",
               "weather_solar": "success",
@@ -233,7 +227,7 @@ jobs:
       - name: Build final V2-R modelling table
         run: >-
           gb-v2 build-dataset
-          --mapping config/data_mapping_core.yaml
+          --mapping config/data_mapping_paper_v2r.yaml
           --output data/processed/gb_half_hourly_v2r.parquet
 
       - name: Train final candidate
@@ -283,7 +277,11 @@ jobs:
               "training_end_exclusive": "2026-10-31",
               "holdout_rows": 4320,
               "transform_selection_rows": 1440,
-              "weather_vintage": "ECMWF IFS HRES D-1 00:00 UTC exact Single Run",
+              "weather_vintage": (
+                  "ECMWF IFS exact D-1 00:00 UTC Single Run where archived; "
+                  "fixed 24-hour-lead Previous Runs fallback otherwise"
+              ),
+              "inertia": "excluded because public NESO series is incomplete through the evidence end date",
               "gas_eua": "inactive",
               "output_sha256": files,
           }
