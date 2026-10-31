@@ -1,0 +1,51 @@
+# Paper-specific V2-R mapping. System inertia is excluded because NESO's public
+# inertia archive does not provide complete coverage through the pre-specified
+# 2026-10-31 evidence end date. No forward-filling or synthetic substitution is used.
+# Real-data mapping validated against the July 2025 V4 collection artifact.
+# This is an explicit core profile: battery output is not substituted with zero.
+
+required_components:
+  - demand_mw
+  - embedded_wind_mw
+  - embedded_solar_mw
+  - transmission_wind_mw
+  - nuclear_mw
+  - net_import_mw
+
+paths:
+  elexon_price: data/parsed/elexon/elexon_mid.parquet
+  elexon_demand: data/parsed/elexon/elexon_demand.parquet
+  elexon_fuel: data/parsed/elexon/elexon_fuelhh.parquet
+  elexon_interconnectors: data/parsed/elexon/elexon_interconnectors.parquet
+  neso_embedded: data/parsed/neso/embedded.parquet
+  weather_demand: data/parsed/weather/demand.parquet
+  weather_wind: data/parsed/weather/wind.parquet
+  weather_solar: data/parsed/weather/solar.parquet
+
+columns:
+  price_gbp_mwh: price_gbp_mwh
+  demand_mw: demand_mw
+  transmission_wind_mw: fuel_wind_mw
+  nuclear_mw: fuel_nuclear_mw
+  embedded_timestamp: timestamp
+  embedded_published_at: published_at_utc
+  embedded_wind_mw: embedded_wind_mw
+  embedded_solar_mw: embedded_solar_mw
+
+optional_columns:
+  net_import_mw: net_import_mw
+
+issue_time:
+  # Day-ahead forecast issue time in local GB time.
+  local_hour: 13
+  local_minute: 0
+
+
+# Optional market-regime datasets. Training remains valid when these files are
+# absent; when present they are selected point-in-time and used only by the
+# price layer.
+optional_paths:
+  entsoe_neighbour_prices: data/parsed/entsoe/neighbour_prices.parquet
+  # Optional user/licensed point-in-time market series. Expected columns include
+  # timestamp plus any of gas_price_gbp_mwh_th, eua_gbp_tco2 and published_at_utc.
+  market_regime: data/parsed/market/market_regime.parquet
