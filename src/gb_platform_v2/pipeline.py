@@ -43,6 +43,14 @@ CORE_COMPONENT_TARGETS = [
     "net_import_mw",
     "inertia_gvas",
 ]
+CORE_NO_INERTIA_TARGETS = [
+    "demand_mw",
+    "embedded_wind_mw",
+    "embedded_solar_mw",
+    "transmission_wind_mw",
+    "nuclear_mw",
+    "net_import_mw",
+]
 SIGNED_COMPONENT_TARGETS = {"net_import_mw", "battery_net_mw"}
 DERIVED_TARGET_COLUMNS = {
     "total_wind_mw",
@@ -92,6 +100,9 @@ def _component_targets(frame: pd.DataFrame) -> tuple[str, list[str]]:
     elif profiles == {"core_without_battery"}:
         profile = "core_without_battery"
         targets = CORE_COMPONENT_TARGETS
+    elif profiles == {"core_without_battery_or_inertia"}:
+        profile = "core_without_battery_or_inertia"
+        targets = CORE_NO_INERTIA_TARGETS
     else:
         raise ValueError(f"Dataset contains inconsistent model profiles: {sorted(profiles)}")
 
