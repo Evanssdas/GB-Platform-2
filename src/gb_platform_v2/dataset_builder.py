@@ -80,7 +80,6 @@ def _component_profile(config: dict) -> list[str]:
         "transmission_wind_mw",
         "nuclear_mw",
         "net_import_mw",
-        "inertia_gvas",
     }
     missing_minimum = sorted(minimum - set(required))
     if missing_minimum:
@@ -290,19 +289,20 @@ def build_half_hourly_dataset(
         validate="one_to_one",
     )
 
-    inertia = loaded["neso_inertia"].copy()
-    inertia_timestamp = _required(columns, "inertia_timestamp")
-    inertia = _timestamp(inertia, inertia_timestamp).rename(columns={inertia_timestamp: "timestamp"})
-    inertia_value = _required(columns, "inertia_gvas")
-    if inertia_value not in inertia:
-        raise KeyError(f"Mapped inertia column is absent: {inertia_value}")
-    inertia = inertia[["timestamp", inertia_value]].drop_duplicates("timestamp", keep="last")
-    base = base.merge(
-        inertia.rename(columns={inertia_value: "inertia_gvas"}),
-        on="timestamp",
-        how="left",
-        validate="one_to_one",
-    )
+    if "inertia_gvas" in required_components:
+        inertia = loaded["neso_inertia"].copy()
+        inertia_timestamp = _required(columns, "inertia_timestamp")
+        inertia = _timestamp(inertia, inertia_timestamp).rename(columns={inertia_timestamp: "timestamp"})
+        inertia_value = _required(columns, "inertia_gvas")
+        if inertia_value not in inertia:
+            raise KeyError(f"Mapped inertia column is absent: {inertia_value}")
+        inertia = inertia[["timestamp", inertia_value]].drop_duplicates("timestamp", keep="last")
+        base = base.merge(
+            inertia.rename(columns={inertia_value: "inertia_gvas"}),
+            on="timestamp",
+            how="left",
+            validate="one_to_one",
+        )
 
     for weather_path in ("weather_demand", "weather_wind", "weather_solar"):
         weather = _align_weather(loaded[weather_path], base["timestamp"])
@@ -343,9 +343,12 @@ def build_half_hourly_dataset(
 
     base = base.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
     base["delivery_time_utc"] = base["timestamp"]
-    base["model_profile"] = (
-        "full" if "battery_net_mw" in required_components else "core_without_battery"
-    )
+    if "battery_net_mw" in required_components:
+        base["model_profile"] = "full"
+    elif "inertia_gvas" in required_components:
+        base["model_profile"] = "core_without_battery"
+    else:
+        base["model_profile"] = "core_without_battery_or_inertia"
     required_targets = ["price_gbp_mwh", *required_components]
     missing_counts = base[required_targets].isna().sum()
     if missing_counts.any():
