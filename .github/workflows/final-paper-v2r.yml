@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: final-paper-v2r-validation
+  group: final-paper-v2r-validation-retry
   cancel-in-progress: true
 
 jobs:
