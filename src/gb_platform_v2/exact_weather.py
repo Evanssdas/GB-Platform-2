@@ -8,6 +8,7 @@ and can be reproduced historically from the Single Runs archive.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -51,9 +52,21 @@ def _payloads_for_sites(
         "timezone": "UTC",
         "models": WEATHER_MODEL,
     }
-    response = session.get(SINGLE_RUN_URL, params=params, timeout=(30, 180))
-    response.raise_for_status()
-    payload = response.json()
+    last_error: Exception | None = None
+    payload = None
+    for attempt in range(6):
+        try:
+            response = session.get(SINGLE_RUN_URL, params=params, timeout=(30, 180))
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            if attempt == 5:
+                raise
+            time.sleep(min(30.0, 2.0 ** attempt))
+    if payload is None:
+        raise RuntimeError("Open-Meteo Single Runs returned no JSON payload") from last_error
     payloads = payload if isinstance(payload, list) else [payload]
     if len(payloads) != len(sites):
         raise ValueError(
