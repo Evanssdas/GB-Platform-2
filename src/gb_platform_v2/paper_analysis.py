@@ -12,7 +12,12 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from .evaluation import probabilistic_summary
-from .features import choose_numeric_features
+from .features import (
+    add_cyclical_time_features,
+    add_market_regime_features,
+    add_weather_features,
+    choose_numeric_features,
+)
 from .models import chronological_holdout_score, train_regressor
 from .pipeline import (
     BASE_NON_FEATURE_COLUMNS,
@@ -176,7 +181,15 @@ def run_analysis(
 ) -> dict:
     frame = pd.read_parquet(dataset_path).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="raise")
-    frame = frame.sort_values("timestamp").reset_index(drop=True)
+    frame = frame.sort_values("timestamp").set_index("timestamp", drop=False)
+
+    # Match the feature-preparation path used by the production training CLI.
+    # The paper analysis must evaluate the same model inputs as the released
+    # candidate rather than a reduced raw-feature variant.
+    frame = add_cyclical_time_features(frame)
+    frame = add_weather_features(frame)
+    frame = add_market_regime_features(frame)
+    frame = frame.reset_index(drop=True)
     if holdout_rows <= 0 or holdout_rows + validation_rows >= len(frame):
         raise ValueError("Insufficient rows for pre-holdout validation plus final holdout")
 
@@ -349,7 +362,7 @@ def run_analysis(
     )
 
     results = {
-        "analysis_revision": "paper-v2r-v1",
+        "analysis_revision": "paper-v2r-v2",
         "model_profile": profile,
         "dataset_rows": int(len(frame)),
         "training_and_validation_rows": int(len(pre)),
@@ -369,6 +382,7 @@ def run_analysis(
         "top_shap_features": shap_summary.head(20).to_dict("records"),
         "scenario_count": int(scenarios),
         "persistence_definition": "exact timestamp minus 48 hours (fully observable at D-1 issue)",
+        "preprocessing_equivalence": "matches gb-v2 train: cyclical time + weather + optional market-regime features",
         "gas_eua_status": "inactive unless point-in-time market_regime.parquet is explicitly supplied",
     }
     (output / "v2r_results.json").write_text(
