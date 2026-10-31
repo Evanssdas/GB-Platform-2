@@ -110,7 +110,9 @@ def collect_exact_issue_weather(
     session.headers.update({"User-Agent": "GB-Power-Market-Platform-V2/0.2"})
     daily_frames: list[pd.DataFrame] = []
 
-    for delivery in _delivery_days(start, end):\n        daily_frames.append(exact_issue_weather_day(sites, delivery, session))\n
+    for delivery in _delivery_days(start, end):
+        daily_frames.append(exact_issue_weather_day(sites, delivery, session))
+
     combined = (
         pd.concat(daily_frames, ignore_index=True)
         .sort_values("timestamp")
