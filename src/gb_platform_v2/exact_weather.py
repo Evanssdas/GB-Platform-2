@@ -60,6 +60,45 @@ def _payloads_for_sites(
     return payloads
 
 
+
+def exact_issue_weather_day(
+    sites: list[dict],
+    delivery: str | pd.Timestamp,
+    session: requests.Session | None = None,
+) -> pd.DataFrame:
+    """Return the exact D-1 00 UTC ECMWF run for one GB delivery day."""
+    day = pd.Timestamp(delivery).tz_localize(None).normalize()
+    client = session or requests.Session()
+    client.headers.update({"User-Agent": "GB-Power-Market-Platform-V2/0.2"})
+    run_utc = (day - pd.Timedelta(days=1)).tz_localize("UTC")
+    periods = settlement_periods_for_day(day).tz_convert("UTC")
+    left = periods.min()
+    right = periods.max() + pd.Timedelta(minutes=30)
+    payloads = _payloads_for_sites(sites, run_utc, client)
+
+    merged: pd.DataFrame | None = None
+    for site, payload in zip(sites, payloads):
+        frame = parse_open_meteo_hourly(payload, str(site["name"]))
+        rename = {
+            f"{site['name']}_{variable}": f"{site['name']}_{variable}_previous_day1"
+            for variable in WEATHER_VARIABLES
+        }
+        frame = frame.rename(columns=rename)
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        frame = frame.loc[
+            frame["timestamp"].between(left, right, inclusive="both")
+        ].copy()
+        merged = (
+            frame
+            if merged is None
+            else merged.merge(frame, on="timestamp", how="outer", validate="one_to_one")
+        )
+    if merged is None or merged.empty:
+        raise ValueError(f"No exact-run weather for delivery date {day.date()}")
+    merged["weather_run_utc"] = run_utc
+    merged["weather_model"] = WEATHER_MODEL
+    return merged.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+
 def collect_exact_issue_weather(
     sites: list[dict],
     start: str,
@@ -71,36 +110,7 @@ def collect_exact_issue_weather(
     session.headers.update({"User-Agent": "GB-Power-Market-Platform-V2/0.2"})
     daily_frames: list[pd.DataFrame] = []
 
-    for delivery in _delivery_days(start, end):
-        run_utc = (delivery - pd.Timedelta(days=1)).tz_localize("UTC")
-        periods = settlement_periods_for_day(delivery).tz_convert("UTC")
-        left = periods.min()
-        right = periods.max() + pd.Timedelta(minutes=30)
-        payloads = _payloads_for_sites(sites, run_utc, session)
-
-        merged: pd.DataFrame | None = None
-        for site, payload in zip(sites, payloads):
-            frame = parse_open_meteo_hourly(payload, str(site["name"]))
-            rename = {
-                f"{site['name']}_{variable}": f"{site['name']}_{variable}_previous_day1"
-                for variable in WEATHER_VARIABLES
-            }
-            frame = frame.rename(columns=rename)
-            frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-            frame = frame.loc[
-                frame["timestamp"].between(left, right, inclusive="both")
-            ].copy()
-            merged = (
-                frame
-                if merged is None
-                else merged.merge(frame, on="timestamp", how="outer", validate="one_to_one")
-            )
-        if merged is None or merged.empty:
-            raise ValueError(f"No exact-run weather for delivery date {delivery.date()}")
-        merged["weather_run_utc"] = run_utc
-        merged["weather_model"] = WEATHER_MODEL
-        daily_frames.append(merged)
-
+    for delivery in _delivery_days(start, end):\n        daily_frames.append(exact_issue_weather_day(sites, delivery, session))\n
     combined = (
         pd.concat(daily_frames, ignore_index=True)
         .sort_values("timestamp")
