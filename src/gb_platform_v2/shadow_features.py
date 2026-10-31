@@ -12,6 +12,7 @@ import yaml
 from .collection import collect_elexon_core
 from .data.clients import JsonClient
 from .data.parsers import parse_open_meteo_hourly
+from .exact_weather import WEATHER_MODEL, exact_issue_weather_day
 from .features import add_cyclical_time_features, add_weather_features
 from .timebase import LONDON_TZ, settlement_periods_for_day
 
@@ -62,35 +63,32 @@ def _weather_group(
     group: str,
     periods_utc: pd.DatetimeIndex,
 ) -> pd.DataFrame:
-    api_start = periods_utc.min().floor("D").strftime("%Y-%m-%d")
-    right_boundary = periods_utc.max() + pd.Timedelta(minutes=30)
-    api_end = right_boundary.floor("D").strftime("%Y-%m-%d")
-    merged: pd.DataFrame | None = None
-    for site in sites:
-        frame = _forecast_weather_site(site, api_start, api_end)
-        merged = frame if merged is None else merged.merge(
-            frame, on="timestamp", how="outer", validate="one_to_one"
-        )
-    if merged is None or merged.empty:
-        raise ValueError(f"No live weather was collected for group {group}")
+    """Build live weather from the same exact run rule used for V2-R training."""
+    delivery_local = periods_utc.tz_convert(LONDON_TZ)[0].date()
+    merged = exact_issue_weather_day(sites, str(delivery_local))
     merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True)
-    merged = merged.set_index("timestamp").sort_index()
+    metadata_columns = {"weather_run_utc", "weather_model"}
+    value_columns = [
+        column for column in merged.columns
+        if column != "timestamp" and column not in metadata_columns
+    ]
+    merged = merged[["timestamp", *value_columns]].set_index("timestamp").sort_index()
 
+    right_boundary = periods_utc.max() + pd.Timedelta(minutes=30)
     if right_boundary not in merged.index:
         tail = merged.loc[:right_boundary].tail(1).copy()
         if tail.empty:
-            raise ValueError(f"Live weather has no right boundary for {group}")
+            raise ValueError(f"Exact weather run has no right boundary for {group}")
         tail.index = pd.DatetimeIndex([right_boundary])
         merged = pd.concat([merged, tail])
     union = merged.index.union(periods_utc).sort_values()
     half_hourly = merged.reindex(union).interpolate(method="time").reindex(periods_utc)
     if half_hourly.isna().any().any():
         missing = half_hourly.columns[half_hourly.isna().any()].tolist()
-        raise ValueError(f"Live weather contains gaps for {group}: {missing}")
+        raise ValueError(f"Exact weather run contains gaps for {group}: {missing}")
     return half_hourly.rename(
         columns={column: f"weather_{group}_{column}" for column in half_hourly.columns}
     )
-
 
 def _collect_price_anchors(
     periods_utc: pd.DatetimeIndex,
@@ -262,7 +260,10 @@ def build_shadow_features(
             column for column in optional_market_features if frame[column].isna().all()
         ),
         "fallback_targets": sorted(fallback_targets),
-        "weather_source": "Open-Meteo current forecast retrieved over complete UTC settlement span",
+        "weather_source": (
+            f"Open-Meteo Single Runs {WEATHER_MODEL}; exact D-1 00:00 UTC run, "
+            "identical vintage rule to V2-R historical training"
+        ),
         "fallback_source": "Elexon observed profile at exact UTC timestamp minus 168 hours",
         "price_anchor_features": sorted(price_anchor_features),
         "price_anchor_source": "Elexon APXMIDP at exact UTC timestamp minus 48 and 168 hours",
