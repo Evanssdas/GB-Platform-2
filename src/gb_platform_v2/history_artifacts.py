@@ -15,7 +15,6 @@ CRITICAL_STATUS_KEYS = (
     "install_test",
     "elexon_core",
     "neso_embedded",
-    "neso_inertia",
     "weather_demand",
     "weather_wind",
     "weather_solar",
@@ -27,7 +26,6 @@ HALF_HOURLY_SOURCES = {
     "elexon/elexon_demand.parquet": "timestamp",
     "elexon/elexon_fuelhh.parquet": "timestamp",
     "elexon/elexon_interconnectors.parquet": "timestamp",
-    "neso/inertia.parquet": "timestamp",
 }
 
 WEATHER_GROUPS = ("demand", "wind", "solar")
@@ -373,6 +371,25 @@ def prepare_historical_artifacts(
     _write_frame(embedded, output / "neso/embedded.parquet")
     source_rows["neso/embedded.parquet"] = len(embedded)
 
+    # NESO temporarily paused public System Inertia updates during the V2-R
+    # evidence window. Inertia is therefore optional in this paper-specific
+    # reconstruction: retain it only when all artifacts provide complete
+    # coverage of the leakage-safe training clock. Never forward-fill it.
+    inertia_paths = [item["root"] / "neso/inertia.parquet" for item in artifacts]
+    inertia_status = "not_available"
+    if all(path.exists() for path in inertia_paths):
+        try:
+            inertia = _combine_unique_half_hourly(
+                artifacts,
+                "neso/inertia.parquet",
+                training_expected_half_hours,
+            )
+            _write_frame(inertia, output / "neso/inertia.parquet")
+            source_rows["neso/inertia.parquet"] = len(inertia)
+            inertia_status = "complete"
+        except ValueError:
+            inertia_status = "incomplete_source_coverage_excluded"
+
     for group in WEATHER_GROUPS:
         weather = _combine_weather(artifacts, group, expected_hours, end_utc)
         _write_frame(weather, output / f"weather/{group}.parquet")
@@ -421,6 +438,11 @@ def prepare_historical_artifacts(
             else None
         ),
         "weather_boundary_policy": "carry final hourly forecast to exclusive end boundary",
+        "inertia_status": inertia_status,
+        "inertia_policy": (
+            "Use only with complete timestamp coverage; otherwise exclude the variable. "
+            "No forward filling or synthetic inertia values are permitted."
+        ),
         "source_rows": source_rows,
     }
     target = Path(summary_path) if summary_path else output / "history_merge_summary.json"
