@@ -198,24 +198,44 @@ def train_platform(
         dict.fromkeys(column for column in price_features if column in price_training.columns)
     )
 
-    price_variant_metrics = {}
+    # Select the target transform before the final hold-out so the 90-day test
+    # remains genuinely untouched. The final hold-out is used only once, after
+    # identity/arcsinh selection on the immediately preceding validation block.
+    pre_holdout_price = price_training.iloc[:-holdout_rows].copy()
+    if len(pre_holdout_price) < 48 * 60:
+        raise ValueError("Insufficient pre-holdout rows for transform selection")
+    transform_selection_rows = min(48 * 30, max(48 * 14, len(pre_holdout_price) // 5))
+    if transform_selection_rows >= len(pre_holdout_price):
+        transform_selection_rows = max(48, len(pre_holdout_price) // 4)
+
+    price_transform_validation = {}
     for transform in ("arcsinh", "identity"):
-        price_variant_metrics[transform] = chronological_holdout_score(
-            price_training,
+        price_transform_validation[transform] = chronological_holdout_score(
+            pre_holdout_price,
             price_features,
             "price_gbp_mwh",
-            holdout_rows,
+            transform_selection_rows,
             transform=transform,
             scale=50.0,
         )
     selected_price_transform = min(
-        price_variant_metrics,
-        key=lambda name: price_variant_metrics[name]["model_mae"],
+        price_transform_validation,
+        key=lambda name: price_transform_validation[name]["model_mae"],
+    )
+    final_price_metric = chronological_holdout_score(
+        price_training,
+        price_features,
+        "price_gbp_mwh",
+        holdout_rows,
+        transform=selected_price_transform,
+        scale=50.0,
     )
     metrics["price_gbp_mwh"] = dict(
-        price_variant_metrics[selected_price_transform],
+        final_price_metric,
         selected_transform=selected_price_transform,
-        variant_metrics=price_variant_metrics,
+        transform_selection_rows=int(transform_selection_rows),
+        transform_selection_is_pre_holdout=True,
+        variant_validation_metrics=price_transform_validation,
     )
 
     # Keep an honest out-of-fold price residual alongside the component errors.
@@ -268,7 +288,9 @@ def train_platform(
             "metrics": metrics,
             "stacking": "expanding_window_out_of_fold",
             "price_transform_selected": selected_price_transform,
-            "price_transform_candidates": price_variant_metrics,
+            "price_transform_selection_rows": int(transform_selection_rows),
+            "price_transform_selection_is_pre_holdout": True,
+            "price_transform_candidates": price_transform_validation,
             "price_error_column": "price_error_gbp_mwh",
             "price_error_definition": "actual APXMIDP minus out-of-fold price forecast",
             "time_series_splits": time_series_splits,
