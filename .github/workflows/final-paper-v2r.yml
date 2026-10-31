@@ -1,0 +1,341 @@
+name: Final paper V2-R validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: final-paper-v2r-validation
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[paper-v2r]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: A
+            start: "2025-04-01"
+            end: "2026-01-01"
+            embedded: embedded_2025
+            inertia: inertia_2025_26
+          - key: B
+            start: "2026-01-01"
+            end: "2026-04-01"
+            embedded: embedded_2026
+            inertia: inertia_2025_26
+          - key: C
+            start: "2026-04-01"
+            end: "2026-10-31"
+            embedded: embedded_2026
+            inertia: inertia_2026_27
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          mkdir -p data/parsed/elexon data/parsed/neso data/parsed/weather
+
+      - name: Collect Elexon core
+        run: >-
+          timeout 70m gb-v2 collect-elexon
+          --start "${{ matrix.start }}"
+          --end "${{ matrix.end }}"
+          --output data/parsed/elexon
+          --chunk-days 7
+
+      - name: Collect NESO embedded and inertia in bounded chunks
+        shell: bash
+        env:
+          START_DATE: ${{ matrix.start }}
+          END_DATE: ${{ matrix.end }}
+          EMBEDDED: ${{ matrix.embedded }}
+          INERTIA: ${{ matrix.inertia }}
+        run: |
+          timeout 70m python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          import pandas as pd
+
+          def collect(preset: str, destination: str) -> None:
+              start = pd.Timestamp(os.environ["START_DATE"])
+              end = pd.Timestamp(os.environ["END_DATE"])
+              frames = []
+              cursor = start
+              chunk = 0
+              root = Path(destination).parent / (Path(destination).stem + "_chunks")
+              root.mkdir(parents=True, exist_ok=True)
+              while cursor < end:
+                  right = min(cursor + pd.Timedelta(days=31), end)
+                  path = root / f"chunk_{chunk:03d}.parquet"
+                  subprocess.run(
+                      [
+                          "gb-v2", "collect-neso-preset",
+                          "--name", preset,
+                          "--start", cursor.strftime("%Y-%m-%d"),
+                          "--end", right.strftime("%Y-%m-%d"),
+                          "--output", str(path),
+                      ],
+                      check=True,
+                      timeout=20 * 60,
+                  )
+                  frames.append(pd.read_parquet(path))
+                  cursor = right
+                  chunk += 1
+              combined = pd.concat(frames, ignore_index=True)
+              if "timestamp" in combined:
+                  combined["timestamp"] = pd.to_datetime(
+                      combined["timestamp"], utc=True, errors="coerce"
+                  )
+              if "published_at_utc" in combined:
+                  combined["published_at_utc"] = pd.to_datetime(
+                      combined["published_at_utc"], utc=True, errors="coerce"
+                  )
+                  subset = ["timestamp", "published_at_utc"]
+              else:
+                  subset = ["timestamp"]
+              combined = (
+                  combined.sort_values(subset)
+                  .drop_duplicates(subset, keep="last")
+                  .reset_index(drop=True)
+              )
+              Path(destination).parent.mkdir(parents=True, exist_ok=True)
+              combined.to_parquet(destination, index=False)
+
+          collect(os.environ["EMBEDDED"], "data/parsed/neso/embedded.parquet")
+          collect(os.environ["INERTIA"], "data/parsed/neso/inertia.parquet")
+          PY
+
+      - name: Collect exact D-1 ECMWF weather vintages
+        run: |
+          timeout 70m python -m gb_platform_v2.exact_weather             --group demand --start "${{ matrix.start }}" --end "${{ matrix.end }}"             --output data/parsed/weather/demand.parquet
+          timeout 70m python -m gb_platform_v2.exact_weather             --group wind --start "${{ matrix.start }}" --end "${{ matrix.end }}"             --output data/parsed/weather/wind.parquet
+          timeout 70m python -m gb_platform_v2.exact_weather             --group solar --start "${{ matrix.start }}" --end "${{ matrix.end }}"             --output data/parsed/weather/solar.parquet
+
+      - name: Audit and freeze historical artifact metadata
+        shell: bash
+        env:
+          START_DATE: ${{ matrix.start }}
+          END_DATE: ${{ matrix.end }}
+          EMBEDDED: ${{ matrix.embedded }}
+          INERTIA: ${{ matrix.inertia }}
+          KEY: ${{ matrix.key }}
+        run: |
+          python -m gb_platform_v2.data_audit             --input data/parsed --output data/parsed/data_audit.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          context = {
+              "workflow_revision": "historical-v4",
+              "run_id": f"{os.environ.get('GITHUB_RUN_ID')}-{os.environ['KEY']}",
+              "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "commit_sha": os.environ.get("GITHUB_SHA"),
+              "start_date_inclusive": os.environ["START_DATE"],
+              "end_date_exclusive": os.environ["END_DATE"],
+              "embedded_preset": os.environ["EMBEDDED"],
+              "inertia_preset": os.environ["INERTIA"],
+              "weather_vintage": "Open-Meteo Single Runs ECMWF IFS HRES D-1 00:00 UTC",
+              "issue_time_local": "13:00 Europe/London",
+          }
+          status = {
+              "input_validation": "success",
+              "install_test": "success",
+              "elexon_core": "success",
+              "neso_embedded": "success",
+              "neso_inertia": "success",
+              "weather_demand": "success",
+              "weather_wind": "success",
+              "weather_solar": "success",
+              "audit": "success",
+          }
+          Path("data/parsed/workflow_context.json").write_text(
+              json.dumps(context, indent=2), encoding="utf-8"
+          )
+          Path("data/parsed/workflow_status.json").write_text(
+              json.dumps(status, indent=2), encoding="utf-8"
+          )
+          PY
+
+      - name: Upload audited history window
+        uses: actions/upload-artifact@v6
+        with:
+          name: paper-v2r-history-${{ matrix.key }}
+          path: data/parsed
+          retention-days: 90
+
+  analyse:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[paper-v2r]')
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MPLBACKEND: Agg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install and test frozen code
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: paper-v2r-history-A
+          path: inputs/history_A
+      - uses: actions/download-artifact@v6
+        with:
+          name: paper-v2r-history-B
+          path: inputs/history_B
+      - uses: actions/download-artifact@v6
+        with:
+          name: paper-v2r-history-C
+          path: inputs/history_C
+
+      - name: Reconstruct audited point-in-time training tree
+        run: >-
+          python -m gb_platform_v2.history_artifacts
+          --inputs inputs/history_A inputs/history_B inputs/history_C
+          --output data/parsed
+          --start 2025-04-01
+          --end 2026-10-31
+          --issue-hour 13
+          --issue-minute 0
+          --summary outputs/paper_v2r/history_merge_summary.json
+
+      - name: Build final V2-R modelling table
+        run: >-
+          gb-v2 build-dataset
+          --mapping config/data_mapping_core.yaml
+          --output data/processed/gb_half_hourly_v2r.parquet
+
+      - name: Train final candidate
+        run: >-
+          gb-v2 train
+          --input data/processed/gb_half_hourly_v2r.parquet
+          --models models/paper_v2r
+          --holdout-rows 4320
+          --time-series-splits 5
+
+      - name: Run frozen manuscript analysis
+        run: >-
+          python -m gb_platform_v2.paper_analysis
+          --dataset data/processed/gb_half_hourly_v2r.parquet
+          --output outputs/paper_v2r
+          --holdout-rows 4320
+          --validation-rows 1440
+          --time-series-splits 5
+          --scenarios 1000
+
+      - name: Prepare shadow-only V2 operational bundle
+        run: >-
+          python -m gb_platform_v2.operational_bundle
+          --dataset data/processed/gb_half_hourly_v2r.parquet
+          --models models/paper_v2r
+          --holdout-rows 4320
+          --summary outputs/paper_v2r/operational_bundle.json
+
+      - name: Freeze analysis manifest and repository tag
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("outputs/paper_v2r")
+          files = {}
+          for path in sorted(root.rglob("*")):
+              if path.is_file():
+                  files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+          manifest = {
+              "analysis_revision": "paper-v2r-v1",
+              "repository_commit": os.environ["GITHUB_SHA"],
+              "training_start_inclusive": "2025-04-01",
+              "training_end_exclusive": "2026-10-31",
+              "holdout_rows": 4320,
+              "transform_selection_rows": 1440,
+              "weather_vintage": "ECMWF IFS HRES D-1 00:00 UTC exact Single Run",
+              "gas_eua": "inactive",
+              "output_sha256": files,
+          }
+          (root / "analysis_manifest.json").write_text(
+              json.dumps(manifest, indent=2), encoding="utf-8"
+          )
+          PY
+          TAG="paper-v2r-analysis-$(echo "$GITHUB_SHA" | cut -c1-12)"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "$TAG"
+          fi
+          echo "$TAG" > outputs/paper_v2r/repository_tag.txt
+
+      - name: Package V2 shadow release
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("models/paper_v2r/metadata.json")
+          metadata = json.loads(p.read_text(encoding="utf-8"))
+          metadata["model_version"] = "core-regime-operational-v2"
+          metadata["release_status"] = "shadow_only"
+          p.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+          PY
+          mkdir -p release/models release/metadata
+          cp -a models/paper_v2r/. release/models/
+          cp outputs/paper_v2r/v2r_results.json release/metadata/
+          cp outputs/paper_v2r/operational_bundle.json release/metadata/
+          cp outputs/paper_v2r/analysis_manifest.json release/metadata/
+          cp outputs/paper_v2r/repository_tag.txt release/metadata/
+          (cd release && zip -qr ../operational-core-v2.zip .)
+          sha256sum operational-core-v2.zip > operational-core-v2.zip.sha256
+
+      - name: Publish or refresh V2 shadow-only release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view operational-core-v2 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload operational-core-v2               operational-core-v2.zip operational-core-v2.zip.sha256               --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create operational-core-v2               operational-core-v2.zip operational-core-v2.zip.sha256               --repo "$GITHUB_REPOSITORY"               --title "GB Platform 2 V2-R — prospective shadow only"               --notes "Frozen V2-R bundle for prospective immutable shadow validation. Not a production trading authorisation."
+          fi
+
+      - name: Upload final manuscript-analysis evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: final-paper-v2r-analysis-${{ github.run_id }}
+          path: |
+            data/processed/gb_half_hourly_v2r.parquet
+            models/paper_v2r
+            outputs/paper_v2r
+            operational-core-v2.zip.sha256
+          retention-days: 365
