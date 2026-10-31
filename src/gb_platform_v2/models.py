@@ -108,15 +108,20 @@ def _daily_persistence_for_test(
     return baseline
 
 
-def chronological_holdout_score(
+def chronological_holdout_predictions(
     frame: pd.DataFrame,
     features: list[str],
     target: str,
     holdout_rows: int,
     transform: str = "identity",
     scale: float = 50.0,
-) -> dict[str, float]:
-    clean = frame.dropna(subset=[*features, target]).copy()
+) -> tuple[pd.DataFrame, TrainedRegressor]:
+    """Return an untouched chronological hold-out forecast and its fitted model.
+
+    LightGBM handles missing feature values natively, so only missing targets are
+    removed. The fitted model sees rows strictly before the final hold-out.
+    """
+    clean = frame.dropna(subset=[target]).copy()
     if holdout_rows <= 0 or holdout_rows >= len(clean):
         raise ValueError("holdout_rows must be between zero and dataset length")
     train = clean.iloc[:-holdout_rows]
@@ -125,11 +130,53 @@ def chronological_holdout_score(
     prediction = pd.Series(fitted.predict(test), index=test.index, dtype=float)
     actual = pd.to_numeric(test[target], errors="coerce").astype(float)
     baseline = _daily_persistence_for_test(clean, test, target)
-    comparable = baseline.notna() & actual.notna() & prediction.notna()
+    timestamps = pd.DatetimeIndex(_timestamp_series(test))
+    output = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "actual": actual.to_numpy(dtype=float),
+            "prediction": prediction.to_numpy(dtype=float),
+            "persistence": pd.to_numeric(baseline, errors="coerce").to_numpy(dtype=float),
+        },
+        index=test.index,
+    )
+    output["error"] = output["prediction"] - output["actual"]
+    output["absolute_error"] = output["error"].abs()
+    output["persistence_absolute_error"] = (
+        output["persistence"] - output["actual"]
+    ).abs()
+    return output, fitted
+
+
+def chronological_holdout_score(
+    frame: pd.DataFrame,
+    features: list[str],
+    target: str,
+    holdout_rows: int,
+    transform: str = "identity",
+    scale: float = 50.0,
+) -> dict[str, float]:
+    output, _ = chronological_holdout_predictions(
+        frame,
+        features,
+        target,
+        holdout_rows,
+        transform,
+        scale,
+    )
+    comparable = (
+        output["persistence"].notna()
+        & output["actual"].notna()
+        & output["prediction"].notna()
+    )
     if not comparable.any():
         raise ValueError(f"No timestamp-matched daily persistence rows for target {target}")
-    model_mae = mean_absolute_error(actual.loc[comparable], prediction.loc[comparable])
-    baseline_mae = mean_absolute_error(actual.loc[comparable], baseline.loc[comparable])
+    model_mae = mean_absolute_error(
+        output.loc[comparable, "actual"], output.loc[comparable, "prediction"]
+    )
+    baseline_mae = mean_absolute_error(
+        output.loc[comparable, "actual"], output.loc[comparable, "persistence"]
+    )
     return {
         "model_mae": float(model_mae),
         "baseline_mae": float(baseline_mae),
@@ -137,8 +184,8 @@ def chronological_holdout_score(
         if baseline_mae
         else 0.0,
         "comparison_rows": int(comparable.sum()),
-        "holdout_rows": int(len(test)),
-        "baseline_missing_rows": int((~baseline.notna()).sum()),
+        "holdout_rows": int(len(output)),
+        "baseline_missing_rows": int(output["persistence"].isna().sum()),
         "baseline_definition": "observable day-ahead baseline at exact timestamp minus 48 hours",
     }
 
