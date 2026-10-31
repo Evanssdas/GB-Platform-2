@@ -13,6 +13,8 @@ from pathlib import Path
 import pandas as pd
 import requests
 import yaml
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .data.parsers import parse_open_meteo_hourly
 from .timebase import LONDON_TZ, settlement_periods_for_day
@@ -49,7 +51,7 @@ def _payloads_for_sites(
         "timezone": "UTC",
         "models": WEATHER_MODEL,
     }
-    response = session.get(SINGLE_RUN_URL, params=params, timeout=90)
+    response = session.get(SINGLE_RUN_URL, params=params, timeout=(30, 180))
     response.raise_for_status()
     payload = response.json()
     payloads = payload if isinstance(payload, list) else [payload]
@@ -68,7 +70,21 @@ def exact_issue_weather_day(
 ) -> pd.DataFrame:
     """Return the exact D-1 00 UTC ECMWF run for one GB delivery day."""
     day = pd.Timestamp(delivery).tz_localize(None).normalize()
-    client = session or requests.Session()
+    if session is None:
+        retry = Retry(
+            total=6,
+            connect=6,
+            read=6,
+            status=6,
+            backoff_factor=2.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+            respect_retry_after_header=True,
+        )
+        client = requests.Session()
+        client.mount("https://", HTTPAdapter(max_retries=retry))
+    else:
+        client = session
     client.headers.update({"User-Agent": "GB-Power-Market-Platform-V2/0.2"})
     run_utc = (day - pd.Timedelta(days=1)).tz_localize("UTC")
     periods = settlement_periods_for_day(day).tz_convert("UTC")
@@ -106,7 +122,18 @@ def collect_exact_issue_weather(
     output: str | Path,
 ) -> Path:
     """Collect one reproducible D-1 00 UTC ECMWF IFS HRES run per delivery day."""
+    retry = Retry(
+        total=6,
+        connect=6,
+        read=6,
+        status=6,
+        backoff_factor=2.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+    )
     session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
     session.headers.update({"User-Agent": "GB-Power-Market-Platform-V2/0.2"})
     daily_frames: list[pd.DataFrame] = []
 
