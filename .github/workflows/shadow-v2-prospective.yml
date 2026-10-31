@@ -1,0 +1,140 @@
+name: V2 prospective shadow forecast
+
+on:
+  workflow_dispatch:
+    inputs:
+      delivery_date:
+        description: Optional GB delivery date YYYY-MM-DD; blank means tomorrow
+        required: false
+        default: ""
+  schedule:
+    - cron: "50 11 * * *"
+    - cron: "50 12 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v2-prospective-shadow
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      MPLBACKEND: Agg
+      MODEL_VERSION: core-regime-operational-v2
+      RELEASE_TAG: operational-core-v2
+      RELEASE_ASSET: operational-core-v2.zip
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Resolve valid scheduled issue
+        id: dates
+        shell: bash
+        env:
+          MANUAL_DATE: ${{ inputs.delivery_date }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
+          now = datetime.now(timezone.utc)
+          local = now.astimezone(ZoneInfo("Europe/London"))
+          proceed = True
+          if os.environ["EVENT_NAME"] == "schedule":
+              offset = int(local.utcoffset().total_seconds() // 3600)
+              expected_hour = 12 - offset
+              scheduled_hour = int(os.environ.get("EVENT_SCHEDULE", "0 0 * * *").split()[1])
+              proceed = scheduled_hour == expected_hour
+          manual = os.environ.get("MANUAL_DATE", "").strip()
+          delivery = manual or (local.date() + timedelta(days=1)).isoformat()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              handle.write(f"proceed={str(proceed).lower()}\n")
+              handle.write(f"delivery={delivery}\n")
+              handle.write(f"issue={now.isoformat()}\n")
+          PY
+
+      - name: Check V2 release exists
+        if: steps.dates.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+
+      - name: Install and test
+        if: steps.dates.outputs.proceed == 'true'
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Download frozen V2 model
+        if: steps.dates.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p operational_bundle
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"             --pattern "$RELEASE_ASSET" --dir operational_bundle
+          unzip -q "operational_bundle/$RELEASE_ASSET" -d operational_bundle/unpacked
+
+      - name: Build exact-vintage V2 features
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          python -m gb_platform_v2.shadow_features
+          --delivery-date "${{ steps.dates.outputs.delivery }}"
+          --issue-time-utc "${{ steps.dates.outputs.issue }}"
+          --config config/example.yaml
+          --models operational_bundle/unpacked/models
+          --output data/processed/v2_shadow_features.parquet
+          --recent-dir data/parsed/v2_shadow_recent
+          --summary outputs/v2_shadow_feature_summary.json
+
+      - name: Issue immutable V2 shadow forecast
+        if: steps.dates.outputs.proceed == 'true'
+        run: >-
+          python -m gb_platform_v2.cli live-forecast
+          --input data/processed/v2_shadow_features.parquet
+          --models operational_bundle/unpacked/models
+          --output outputs/v2_shadow
+          --forecasts live/v2/forecasts.csv
+          --model-version "$MODEL_VERSION"
+          --issue-time-utc "${{ steps.dates.outputs.issue }}"
+          --scenarios 1000
+          --scores live/v2/scores.csv
+          --calibration-source-model-version "$MODEL_VERSION"
+          --calibration-lookback-days 7
+          --component-forecasts live/v2/component_forecasts.csv
+
+      - name: Commit V2-only immutable history
+        if: steps.dates.outputs.proceed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p live/v2
+          git add live/v2
+          if ! git diff --cached --quiet; then
+            git commit -m "Add V2 prospective shadow forecast ${{ steps.dates.outputs.delivery }}"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Upload V2 shadow evidence
+        if: always() && steps.dates.outputs.proceed == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: v2-shadow-${{ steps.dates.outputs.delivery }}-${{ github.run_id }}
+          path: |
+            data/processed/v2_shadow_features.parquet
+            outputs/v2_shadow
+            outputs/v2_shadow_feature_summary.json
+            live/v2
+          retention-days: 365
