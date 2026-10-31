@@ -1,0 +1,168 @@
+name: V2 prospective grading
+
+on:
+  workflow_dispatch:
+    inputs:
+      delivery_date:
+        description: Latest GB delivery date to grade YYYY-MM-DD; blank means previous GB day
+        required: false
+        default: ""
+  schedule:
+    - cron: "30 9 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v2-prospective-grading
+  cancel-in-progress: false
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MODEL_VERSION: core-regime-operational-v2
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install and test
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Resolve V2 grading collection window
+        id: dates
+        shell: bash
+        env:
+          REQUESTED_DAY: ${{ inputs.delivery_date }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import date, timedelta
+          from pathlib import Path
+          import pandas as pd
+
+          requested = os.environ.get("REQUESTED_DAY", "").strip()
+          latest = date.fromisoformat(requested) if requested else date.today() - timedelta(days=1)
+          forecast_path = Path("live/v2/forecasts.csv")
+          actual_path = Path("live/v2/actuals.csv")
+
+          forecast_days = []
+          if forecast_path.exists() and forecast_path.stat().st_size:
+              forecasts = pd.read_csv(forecast_path)
+              times = pd.to_datetime(forecasts["delivery_time_utc"], utc=True)
+              forecast_days = sorted(
+                  day for day in times.dt.tz_convert("Europe/London").dt.date.unique()
+                  if day <= latest
+              )
+
+          actual_counts = {}
+          if actual_path.exists() and actual_path.stat().st_size:
+              actuals = pd.read_csv(actual_path)
+              times = pd.to_datetime(actuals["delivery_time_utc"], utc=True)
+              actual_counts = times.dt.tz_convert("Europe/London").dt.date.value_counts().to_dict()
+
+          missing = []
+          for day in forecast_days:
+              start = pd.Timestamp(day).tz_localize("Europe/London").tz_convert("UTC")
+              end = (pd.Timestamp(day) + pd.Timedelta(days=1)).tz_localize("Europe/London").tz_convert("UTC")
+              expected = len(pd.date_range(start, end, freq="30min", inclusive="left"))
+              if int(actual_counts.get(day, 0)) < expected:
+                  missing.append(day)
+
+          start = (min(missing) - timedelta(days=1)) if missing else (latest - timedelta(days=1))
+          end = latest + timedelta(days=1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"latest={latest.isoformat()}\n")
+              handle.write(f"start={start.isoformat()}\n")
+              handle.write(f"end={end.isoformat()}\n")
+          PY
+
+      - name: Collect V2 target actuals
+        run: >-
+          gb-v2 collect-actuals
+          --start "${{ steps.dates.outputs.start }}"
+          --end "${{ steps.dates.outputs.end }}"
+          --actuals live/v2/actuals.csv
+          --revision initial
+
+      - name: Collect V2 component actuals
+        if: hashFiles('live/v2/component_forecasts.csv') != ''
+        run: >-
+          gb-v2 collect-component-actuals
+          --start "${{ steps.dates.outputs.start }}"
+          --end "${{ steps.dates.outputs.end }}"
+          --actuals live/v2/component_actuals.csv
+          --revision initial
+          --work-dir data/parsed/v2_component_actuals
+
+      - name: Grade V2 price forecasts only
+        if: hashFiles('live/v2/forecasts.csv') != ''
+        run: >-
+          gb-v2 grade
+          --forecasts live/v2/forecasts.csv
+          --actuals live/v2/actuals.csv
+          --scores live/v2/scores.csv
+
+      - name: Grade V2 components only
+        if: hashFiles('live/v2/component_forecasts.csv') != '' && hashFiles('live/v2/component_actuals.csv') != ''
+        run: >-
+          gb-v2 grade-components
+          --forecasts live/v2/component_forecasts.csv
+          --actuals live/v2/component_actuals.csv
+          --scores live/v2/component_scores.csv
+
+      - name: Evaluate V2 deployment gate only
+        if: hashFiles('live/v2/scores.csv') != ''
+        run: >-
+          python -m gb_platform_v2.deployment_gate
+          --scores live/v2/scores.csv
+          --model-version "$MODEL_VERSION"
+          --output live/v2/deployment_gate.json
+          --min-days 30
+          --min-improvement-percent 5
+          --coverage-min 0.70
+          --coverage-max 0.90
+          --min-lead-hours 8
+
+      - name: Assert no V1 scores are present in V2 store
+        if: hashFiles('live/v2/scores.csv') != ''
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          scores = pd.read_csv("live/v2/scores.csv")
+          versions = set(scores["model_version"].astype(str))
+          expected = {"core-regime-operational-v2"}
+          if versions != expected:
+              raise SystemExit(f"V2 score store contains unexpected model versions: {versions}")
+          print({"v2_score_rows": len(scores), "model_versions": sorted(versions)})
+          PY
+
+      - name: Commit isolated V2 grading history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p live/v2
+          git add live/v2
+          if ! git diff --cached --quiet; then
+            git commit -m "Grade isolated V2 prospective shadow through ${{ steps.dates.outputs.latest }}"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Upload isolated V2 grading evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: v2-grading-${{ github.run_id }}
+          path: live/v2
+          if-no-files-found: warn
+          retention-days: 365

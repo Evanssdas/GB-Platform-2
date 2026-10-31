@@ -106,15 +106,16 @@ jobs:
       - name: Create or update immutable shadow release
         env:
           TAG: ${{ inputs.release_tag }}
+          ASSET: ${{ inputs.release_asset }}
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" operational-core-v1.zip operational-core-v1.zip.sha256 \
+            gh release upload "$TAG" "$ASSET" "$ASSET.sha256" \
               --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" operational-core-v1.zip operational-core-v1.zip.sha256 \
+            gh release create "$TAG" "$ASSET" "$ASSET.sha256" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Operational core model V1 — shadow only" \
-              --notes "Frozen core_without_battery model bundle. Shadow forecasting only until the 30-day deployment gate passes."
+              --title "Operational core model — shadow only" \
+              --notes "Frozen core_without_battery model bundle. Shadow forecasting only until the deployment gate passes."
           fi
 
       - name: Upload publication diagnostics
