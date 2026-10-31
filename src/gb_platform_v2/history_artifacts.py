@@ -295,10 +295,26 @@ def _combine_weather(
     end_utc: pd.Timestamp,
 ) -> pd.DataFrame:
     relative_path = f"weather/{group}.parquet"
-    frames = [
-        _timestamp_frame(_read_parquet(item["root"] / relative_path), relative_path)
-        for item in artifacts
-    ]
+
+    # Each collected artifact can contain one boundary hour from the adjacent
+    # delivery window because weather is hourly while GB settlement periods are
+    # half-hourly. Trim every artifact to its own declared [start, end) interval
+    # before concatenation so the next artifact owns the seam timestamp. This
+    # avoids arbitrary overwrite/averaging when adjacent windows used different
+    # archived weather vintages.
+    frames: list[pd.DataFrame] = []
+    for item in artifacts:
+        frame = _timestamp_frame(
+            _read_parquet(item["root"] / relative_path),
+            relative_path,
+        )
+        left = _settlement_boundary_utc(item["start"])
+        right = _settlement_boundary_utc(item["end"])
+        frame = frame.loc[
+            frame["timestamp"].between(left, right, inclusive="left")
+        ].copy()
+        frames.append(frame)
+
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.loc[combined["timestamp"].isin(expected)].copy()
     _assert_identical_duplicate_rows(combined, relative_path)
