@@ -365,6 +365,18 @@ def run(
     median7 = _median_d2_d8(frame, test["timestamp"])
     lear = _lear_style_benchmark(frame, pre, test)
 
+    component_metrics = {}
+    for target in targets:
+        component_actual = pd.to_numeric(test[target], errors="coerce")
+        component_pred = component_test[target]
+        component_d2 = _lag_exact(frame, target, test["timestamp"], 2)
+        component_d7 = _lag_exact(frame, target, test["timestamp"], 7)
+        component_metrics[target] = {
+            "model": _point_metrics(component_actual, component_pred),
+            "d2": _point_metrics(component_actual, component_d2),
+            "d7": _point_metrics(component_actual, component_d7),
+        }
+
     point = {
         "v2r": _point_metrics(actual, prediction),
         "d2": _point_metrics(actual, d2),
@@ -584,6 +596,7 @@ def run(
         "selected_transform": selected_transform,
         "transform_validation": transform_scores,
         "point_benchmarks": point,
+        "component_benchmarks": component_metrics,
         "dm_hac_tests": dm,
         "probabilistic_raw": prob,
         "rolling_calibration_secondary": cal_metrics,
