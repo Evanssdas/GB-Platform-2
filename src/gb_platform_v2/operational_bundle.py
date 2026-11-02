@@ -11,7 +11,10 @@ import pandas as pd
 
 
 OPERATIONAL_FALLBACK_TARGETS = {"demand_mw", "nuclear_mw"}
-FALLBACK_LAG = pd.Timedelta(days=7)
+FALLBACK_LAGS = {
+    "d2": pd.Timedelta(days=2),
+    "d7": pd.Timedelta(days=7),
+}
 
 
 def _load_dataset(path: str | Path) -> pd.DataFrame:
@@ -22,7 +25,7 @@ def _load_dataset(path: str | Path) -> pd.DataFrame:
     return frame.set_index("timestamp", drop=False).sort_index()
 
 
-def _lagged_series(series: pd.Series, lag: pd.Timedelta = FALLBACK_LAG) -> pd.Series:
+def _lagged_series(series: pd.Series, lag: pd.Timedelta) -> pd.Series:
     """Return the observed value at the exact UTC timestamp minus ``lag``."""
     source_index = series.index - lag
     lagged = series.reindex(source_index)
@@ -93,18 +96,33 @@ def prepare_operational_bundle(
         fallback_mae = float("nan")
         fallback_rows = 0
 
-        lagged = _lagged_series(frame[target])
+        lagged = None
+        fallback_metrics: dict[str, dict] = {}
         if target in OPERATIONAL_FALLBACK_TARGETS:
-            fallback_mae, fallback_rows = _mae(
-                holdout[target], lagged.reindex(holdout.index)
-            )
-            if np.isfinite(fallback_mae) and (
-                not np.isfinite(model_mae) or fallback_mae < model_mae
-            ):
-                source = "fallback_d7"
-                selected_mae = fallback_mae
+            best_name = None
+            best_mae = float("inf")
+            for name, lag in FALLBACK_LAGS.items():
+                candidate = _lagged_series(frame[target], lag)
+                candidate_mae, candidate_rows = _mae(
+                    holdout[target], candidate.reindex(holdout.index)
+                )
+                fallback_metrics[name] = {
+                    "mae": candidate_mae,
+                    "rows": candidate_rows,
+                    "lag_hours": int(lag / pd.Timedelta(hours=1)),
+                }
+                if np.isfinite(candidate_mae) and candidate_mae < best_mae:
+                    best_mae = candidate_mae
+                    best_name = name
+                    lagged = candidate
+            if best_name is not None:
+                fallback_mae = best_mae
+                fallback_rows = fallback_metrics[best_name]["rows"]
+                if not np.isfinite(model_mae) or fallback_mae < model_mae:
+                    source = f"fallback_{best_name}"
+                    selected_mae = fallback_mae
 
-        if source == "fallback_d7":
+        if source.startswith("fallback_"):
             operational_errors[target] = frame[target].astype(float) - lagged
         else:
             if target not in model_errors:
@@ -114,11 +132,12 @@ def prepare_operational_bundle(
         strategy[target] = {
             "source": source,
             "model_holdout_mae": model_mae,
-            "fallback_d7_holdout_mae": fallback_mae,
+            "fallback_holdout_mae": fallback_mae,
             "fallback_comparison_rows": fallback_rows,
+            "fallback_candidates": fallback_metrics if target in OPERATIONAL_FALLBACK_TARGETS else {},
             "selected_holdout_mae": selected_mae,
             "fallback_definition": (
-                "observed target at exact timestamp minus 168 hours"
+                "best of fully observable exact timestamp minus 48 h and minus 168 h"
                 if target in OPERATIONAL_FALLBACK_TARGETS
                 else None
             ),
@@ -148,9 +167,10 @@ def prepare_operational_bundle(
     )
     metadata["operational_fallback_policy"] = {
         "eligible_targets": sorted(OPERATIONAL_FALLBACK_TARGETS),
-        "lag_hours": int(FALLBACK_LAG / pd.Timedelta(hours=1)),
-        "selection_rule": "choose D-7 only when its chronological holdout MAE beats the component model",
-        "issue_time_compatibility": "fully observable before D-1 13:00 local issue time",
+        "candidate_lag_hours": {name: int(lag / pd.Timedelta(hours=1)) for name, lag in FALLBACK_LAGS.items()},
+        "selection_rule": "post-evaluation operational governance: choose the lower-MAE fully observable D-2/D-7 fallback only when it beats the component model",
+        "selection_stage": "post_evaluation_for_future_shadow_operation_not_primary_holdout",
+        "issue_time_compatibility": "D-2 and D-7 are fully observable before D-1 13:00 local issue time",
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
