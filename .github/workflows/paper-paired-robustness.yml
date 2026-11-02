@@ -1,0 +1,33 @@
+name: Paired manuscript robustness
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  paired-robustness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Retrieve immutable daily predictions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs/v2r inputs/lear
+          gh run download 41476839798 --repo "$GITHUB_REPOSITORY" --name daily-v2r-41476839798 --dir inputs/v2r
+          gh run download 41473271673 --repo "$GITHUB_REPOSITORY" --name rolling-lear-41473271673 --dir inputs/lear
+          find inputs -type f
+      - name: Compare paired daily forecasts
+        run: |
+          python -m gb_platform_v2.paired_robustness --v2r inputs/v2r/daily_v2r_predictions.csv --lear inputs/lear/rolling_lear_predictions.csv --output outputs/paired_robustness
+      - uses: actions/upload-artifact@v6
+        with:
+          name: paired-robustness-${{ github.run_id }}
+          path: outputs/paired_robustness
+          retention-days: 365
