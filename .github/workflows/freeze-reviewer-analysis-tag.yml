@@ -1,0 +1,27 @@
+name: Freeze reviewer analysis tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    if: contains(github.event.head_commit.message, '[freeze-reviewer-analysis]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Tag frozen reviewer analysis commit
+        run: |
+          TAG="paper-reviewer-upgrade-e092735132ec"
+          TARGET="e092735132ec0fb6d1f48d533581461e04db76b9"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists"
+            exit 0
+          fi
+          git tag "$TAG" "$TARGET"
+          git push origin "$TAG"
