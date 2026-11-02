@@ -1,0 +1,37 @@
+name: Paper rolling-origin LEAR analysis
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  rolling-lear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q tests/test_rolling_lear.py
+      - name: Download frozen V2-R evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs/v2r
+          gh run download 41244609403 --repo "$GITHUB_REPOSITORY" --name final-paper-v2r-analysis-41244609403 --dir inputs/v2r
+      - name: Run daily rolling LEAR-style baseline
+        run: |
+          python -m gb_platform_v2.rolling_lear --dataset inputs/v2r/data/processed/gb_half_hourly_v2r.parquet --output outputs/rolling_lear --start 2026-08-02 --end 2026-10-30
+      - uses: actions/upload-artifact@v6
+        with:
+          name: rolling-lear-${{ github.run_id }}
+          path: outputs/rolling_lear
+          retention-days: 365
