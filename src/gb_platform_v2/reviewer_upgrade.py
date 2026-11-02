@@ -4,7 +4,7 @@ This module reuses the frozen V2-R point-in-time dataset. It does not recollect
 or revise historical inputs. Analyses are separated into:
 - primary whole-settlement-day V2-R evaluation;
 - stronger observable benchmarks and HAC/DM comparisons;
-- secondary past-only rolling calibration;
+- secondary issue-time-safe rolling calibration;
 - post-hoc mechanism/ablation diagnostics.
 """
 
@@ -290,9 +290,18 @@ def _rolling_calibration(
     out["dispersion_scale"] = np.nan
 
     for i, row in out.iterrows():
-        left = row["timestamp"] - pd.Timedelta(days=lookback_days)
+        # A D-1 forecast is issued at 13:00 Europe/London on the
+        # PREVIOUS local calendar date, not at the delivery timestamp.
+        # DateOffset preserves the local calendar across DST transitions.
+        delivery_local = row["timestamp"].tz_convert(LONDON_TZ)
+        issue_local = (
+            delivery_local.normalize() - pd.DateOffset(days=1)
+            + pd.Timedelta(hours=13)
+        )
+        issue_utc = issue_local.tz_convert("UTC")
+        left = issue_utc - pd.Timedelta(days=lookback_days)
         history = out.loc[
-            out["timestamp"].lt(row["timestamp"])
+            out["timestamp"].lt(issue_utc)
             & out["timestamp"].ge(left)
             & out["actual"].notna()
         ]
@@ -583,7 +592,7 @@ def run(
     plt.close(fig)
 
     results = {
-        "analysis_revision": "reviewer-upgrade-v1",
+        "analysis_revision": "reviewer-upgrade-v2-issue-time-correction",
         "model_profile": profile,
         "holdout_definition": "last 90 complete Europe/London settlement dates",
         "holdout_local_start": str(holdout_dates[0]),
