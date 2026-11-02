@@ -1,0 +1,36 @@
+name: Paper rolling-origin daily V2-R
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  daily-v2r:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - name: Download frozen historical data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs/v2r
+          gh run download 41244609403 --repo "$GITHUB_REPOSITORY" --name final-paper-v2r-analysis-41244609403 --dir inputs/v2r
+      - name: Daily V2-R evaluation
+        run: |
+          python -m gb_platform_v2.rolling_v2r --dataset inputs/v2r/data/processed/gb_half_hourly_v2r.parquet --output outputs/daily_v2r
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: daily-v2r-${{ github.run_id }}
+          path: outputs/daily_v2r
+          retention-days: 365
