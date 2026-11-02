@@ -19,7 +19,7 @@ def _write(tmp_path, drop=False, bad_actual=False):
 def test_paired_robustness_and_grouping(tmp_path):
     v,l=_write(tmp_path)
     result=evaluate(v,l,tmp_path/"out",draws=50)
-    assert result["rows"]==96 and result["days"]==2
+    assert result["rows"]==96 and result["days"]==3  # UTC-window spans three GB local dates
     assert abs(result["models"]["daily_v2r"]["mae"]-2)<1e-8
     assert result["comparisons_daily_v2r_minus"]["daily_lear"]["mean_absolute_loss_difference_model_minus_benchmark"]<0
     assert (tmp_path/"out"/"robustness_results.json").exists()
