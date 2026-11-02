@@ -305,6 +305,17 @@ def run_analysis(
         scenario_result.quantiles["p90"],
         scenario_result.price_paths,
     )
+    actual_values = price_actual.to_numpy(dtype=float)
+    p10_values = scenario_result.quantiles["p10"].to_numpy(dtype=float)
+    p90_values = scenario_result.quantiles["p90"].to_numpy(dtype=float)
+    prob["below_p10_rate"] = float(np.mean(actual_values < p10_values))
+    prob["above_p90_rate"] = float(np.mean(actual_values > p90_values))
+    pit_values = np.mean(
+        scenario_result.price_paths <= actual_values[None, :],
+        axis=0,
+    )
+    prob["pit_mean"] = float(np.mean(pit_values))
+    prob["pit_std"] = float(np.std(pit_values, ddof=0))
 
     price_output = pd.DataFrame(
         {
@@ -344,6 +355,24 @@ def run_analysis(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     price_output.to_csv(output / "v2r_price_holdout_predictions.csv", index=False)
+    pd.DataFrame(
+        {
+            "timestamp": test["timestamp"],
+            "pit": pit_values,
+            "actual": price_actual,
+        }
+    ).to_csv(output / "v2r_pit_values.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(pit_values, bins=np.linspace(0.0, 1.0, 11), edgecolor="black")
+    ax.axhline(len(pit_values) / 10.0, linestyle="--", linewidth=1.2, label="Uniform expectation")
+    ax.set_title("V2-R probability integral transform histogram")
+    ax.set_xlabel("PIT")
+    ax.set_ylabel("Settlement periods")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output / "figures" / "pit_histogram.png", dpi=200)
+    plt.close(fig)
 
     component_table = test[["timestamp", *component_targets]].copy()
     for target in component_targets:
