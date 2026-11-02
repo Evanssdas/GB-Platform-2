@@ -11,7 +11,7 @@ from gb_platform_v2.operational_bundle import prepare_operational_bundle
 from gb_platform_v2.shadow_features import build_shadow_features
 
 
-def test_operational_bundle_selects_observable_d7_when_it_beats_model(tmp_path):
+def test_operational_bundle_selects_best_observable_d2_or_d7_when_it_beats_model(tmp_path):
     timestamps = pd.date_range("2025-01-01", periods=48 * 40, freq="30min", tz="UTC")
     daily_pattern = np.tile(np.arange(48, dtype=float), 40)
     frame = pd.DataFrame(
@@ -42,8 +42,9 @@ def test_operational_bundle_selects_observable_d7_when_it_beats_model(tmp_path):
 
     summary = prepare_operational_bundle(dataset, model_dir, holdout_rows=48 * 10)
 
-    assert summary["component_strategy"]["demand_mw"]["source"] == "fallback_d7"
-    assert summary["component_strategy"]["nuclear_mw"]["source"] == "fallback_d7"
+    assert summary["component_strategy"]["demand_mw"]["source"] == "fallback_d2"
+    assert summary["component_strategy"]["nuclear_mw"]["source"] == "fallback_d2"
+    assert set(summary["component_strategy"]["demand_mw"]["fallback_candidates"]) == {"d2", "d7"}
     operational_errors = pd.read_parquet(
         model_dir / "operational_component_errors.parquet"
     )

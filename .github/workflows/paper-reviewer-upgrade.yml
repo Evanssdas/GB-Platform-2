@@ -1,0 +1,63 @@
+name: Paper reviewer upgrade analyses
+
+on:
+  push:
+    branches:
+      - paper/reviewer-upgrade-analyses
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MPLBACKEND: Agg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      SOURCE_RUN_ID: "41244609403"
+      SOURCE_ARTIFACT: "final-paper-v2r-analysis-41244609403"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Download frozen V2-R evidence artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs/v2r
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$SOURCE_ARTIFACT" \
+            --dir inputs/v2r
+
+      - name: Run reviewer robustness analyses
+        run: |
+          python -m gb_platform_v2.reviewer_upgrade \
+            --dataset inputs/v2r/data/processed/gb_half_hourly_v2r.parquet \
+            --output outputs/reviewer_upgrade \
+            --whole-days 90 \
+            --validation-rows 1440 \
+            --time-series-splits 5 \
+            --scenarios 1000
+
+      - name: Upload reviewer evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: reviewer-upgrade-${{ github.run_id }}
+          path: outputs/reviewer_upgrade
+          retention-days: 365
