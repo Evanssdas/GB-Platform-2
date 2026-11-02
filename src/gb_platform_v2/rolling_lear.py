@@ -25,8 +25,10 @@ TZ = "Europe/London"
 
 
 def issue_for_date(day: object) -> pd.Timestamp:
-    local_day = pd.Timestamp(day).tz_localize(TZ)
-    return (local_day - pd.DateOffset(days=1) + pd.Timedelta(hours=13)).tz_convert("UTC")
+    # Build the prior *calendar* day's 13:00 wall-clock time before
+    # localizing; timezone-aware midnight arithmetic shifts an hour at DST.
+    issue_wall = pd.Timestamp(day) - pd.Timedelta(days=1) + pd.Timedelta(hours=13)
+    return issue_wall.tz_localize(TZ).tz_convert("UTC")
 
 
 def build_design(frame: pd.DataFrame) -> pd.DataFrame:
