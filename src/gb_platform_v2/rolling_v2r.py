@@ -16,7 +16,7 @@ from .features import choose_numeric_features
 from .pipeline import BASE_NON_FEATURE_COLUMNS, SIGNED_COMPONENT_TARGETS, _add_stacked_balance_features, _component_targets, _is_price_layer_feature
 
 
-def run(dataset, output, start="2026-08-02", end="2026-10-30", lookback_days=365, min_train_rows=6000, splits=5):
+def run(dataset, output, start="2026-08-02", end="2026-10-30", lookback_days=365, min_train_rows=6000, splits=5, publication_lag_minutes=120):
     frame = _prepare(dataset)
     _, targets = _component_targets(frame)
     features = choose_numeric_features(frame, BASE_NON_FEATURE_COLUMNS | {"local_slot"})
@@ -39,7 +39,8 @@ def run(dataset, output, start="2026-08-02", end="2026-10-30", lookback_days=365
     predictions, daily = [], []
     for day in days:
         issue = issue_for_date(day)
-        train = (frame.timestamp < issue) & (frame.timestamp >= issue - pd.Timedelta(days=lookback_days))
+        latest_start = issue - pd.Timedelta(minutes=30 + publication_lag_minutes)
+        train = (frame.timestamp <= latest_start) & (frame.timestamp >= issue - pd.Timedelta(days=lookback_days))
         price_train = train & stacked[targets].notna().all(axis=1) & frame.price_gbp_mwh.notna()
         test = frame.local_date == day
         if price_train.sum() < min_train_rows or not test.any():
@@ -79,5 +80,6 @@ if __name__ == "__main__":
     p.add_argument("--output", required=True)
     p.add_argument("--start", default="2026-08-02")
     p.add_argument("--end", default="2026-10-30")
+    p.add_argument("--publication-lag-minutes", type=int, default=120)
     args = p.parse_args()
-    print(json.dumps(run(args.dataset, args.output, args.start, args.end), indent=2))
+    print(json.dumps(run(args.dataset, args.output, args.start, args.end, publication_lag_minutes=args.publication_lag_minutes), indent=2))
