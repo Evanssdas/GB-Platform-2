@@ -67,10 +67,12 @@ def _weather_group(
     delivery_local = periods_utc.tz_convert(LONDON_TZ)[0].date()
     merged = exact_issue_weather_day(sites, str(delivery_local))
     merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True)
-    metadata_columns = {"weather_run_utc", "weather_model"}
+    # Forecast provenance is metadata, not a numeric interpolation target.
+    metadata_columns = {"weather_run_utc", "weather_model", "weather_vintage_source"}
     value_columns = [
         column for column in merged.columns
         if column != "timestamp" and column not in metadata_columns
+        and pd.api.types.is_numeric_dtype(merged[column])
     ]
     merged = merged[["timestamp", *value_columns]].set_index("timestamp").sort_index()
 
