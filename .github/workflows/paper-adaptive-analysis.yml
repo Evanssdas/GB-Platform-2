@@ -1,0 +1,37 @@
+name: Paper adaptive V2 primary analysis
+on:
+  push:
+    branches:
+      - paper/adaptive-primary-evidence-20261103
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  adaptive-primary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q tests/test_adaptive_analysis.py
+      - name: Download immutable daily V2-R and LEAR prediction artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs/v2r inputs/lear
+          gh run download 41476839798 --repo "$GITHUB_REPOSITORY" --name daily-v2r-41476839798 --dir inputs/v2r
+          gh run download 41473271673 --repo "$GITHUB_REPOSITORY" --name rolling-lear-41473271673 --dir inputs/lear
+      - name: Run 120-minute publication-lag adaptive V2 comparison
+        run: |
+          python -m gb_platform_v2.adaptive_analysis --v2r inputs/v2r/daily_v2r_predictions.csv --lear inputs/lear/rolling_lear_predictions.csv --output outputs/adaptive_primary --publication-lag-minutes 120
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: adaptive-primary-${{ github.run_id }}
+          path: outputs/adaptive_primary
+          retention-days: 365
