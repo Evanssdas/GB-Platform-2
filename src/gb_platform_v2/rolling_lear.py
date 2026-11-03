@@ -53,7 +53,7 @@ def build_design(frame: pd.DataFrame) -> pd.DataFrame:
 
 def run(dataset: str | Path, output: str | Path, *, start: str, end: str,
         lookback_days: int = 365, min_train_rows: int = 6000,
-        alpha_grid: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0)) -> dict:
+        alpha_grid: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0), publication_lag_minutes: int = 120) -> dict:
     frame = _prepare(dataset)
     X = build_design(frame)
     y = pd.to_numeric(frame["price_gbp_mwh"], errors="coerce")
@@ -67,7 +67,8 @@ def run(dataset: str | Path, output: str | Path, *, start: str, end: str,
         issue = issue_for_date(day)
         # Both the training target and the training features must exist.
         cutoff = issue - pd.Timedelta(days=lookback_days)
-        tr = (frame["timestamp"] < issue) & (frame["timestamp"] >= cutoff)
+        latest_start = issue - pd.Timedelta(minutes=30 + publication_lag_minutes)
+        tr = (frame["timestamp"] <= latest_start) & (frame["timestamp"] >= cutoff)
         tr &= y.notna() & X.notna().all(axis=1)
         te = (frame["local_date"] == day) & X.notna().all(axis=1)
         if int(tr.sum()) < min_train_rows:
@@ -132,10 +133,12 @@ def main() -> None:
     p.add_argument("--end", default="2026-10-30")
     p.add_argument("--lookback-days", type=int, default=365)
     p.add_argument("--min-train-rows", type=int, default=6000)
+    p.add_argument("--publication-lag-minutes", type=int, default=120)
     args = p.parse_args()
     print(json.dumps(run(args.dataset, args.output, start=args.start, end=args.end,
                          lookback_days=args.lookback_days,
-                         min_train_rows=args.min_train_rows), indent=2))
+                         min_train_rows=args.min_train_rows,
+                         publication_lag_minutes=args.publication_lag_minutes), indent=2))
 
 
 if __name__ == "__main__":
