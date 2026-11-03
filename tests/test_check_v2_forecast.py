@@ -1,7 +1,13 @@
 from datetime import date
 from pathlib import Path
 import pandas as pd
-from scripts.check_v2_forecast import check, expected_periods
+import importlib.util
+spec=importlib.util.spec_from_file_location(
+    "v2_forecast_check", Path(__file__).resolve().parents[1]/"scripts"/"check_v2_forecast.py"
+)
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+check, expected_periods=module.check, module.expected_periods
 
 def test_uk_settlement_day_lengths():
     assert expected_periods(date(2026, 3, 29)) == 46
