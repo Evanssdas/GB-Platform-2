@@ -1,0 +1,36 @@
+name: Paper battery value sensitivity
+on:
+  push:
+    branches:
+      - paper/battery-value-20261103
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  battery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q tests/test_battery_analysis.py
+      - name: Download verified retrospective adaptive predictions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs
+          gh run download 41741403893 --repo "$GITHUB_REPOSITORY" --name adaptive-primary-41741403893 --dir inputs
+      - name: Schedule forecast-price batteries and settle against observed index
+        run: |
+          python -m gb_platform_v2.battery_analysis --predictions inputs/adaptive_predictions.csv --output outputs/battery
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: battery-value-${{ github.run_id }}
+          path: outputs/battery
+          retention-days: 365
