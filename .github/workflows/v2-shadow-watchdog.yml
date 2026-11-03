@@ -1,0 +1,42 @@
+name: V2 shadow watchdog
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 12 * * *"
+    - cron: "20 13 * * *"
+permissions:
+  contents: read
+  issues: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install pandas
+      - name: Check committed V2 forecast
+        id: check
+        shell: bash
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python scripts/check_v2_forecast.py | tee result.txt
+          else
+            python scripts/check_v2_forecast.py --enforce-window | tee result.txt
+          fi
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Flag missing prospective forecast
+        if: steps.check.outputs.code == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DAY="$(TZ=Europe/London date -d tomorrow +%F)"
+          TITLE="V2 shadow forecast missing for $DAY"
+          if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$TITLE in:title" --json title --jq '.[].title')" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$(cat result.txt)"
+          fi
+          exit 1
