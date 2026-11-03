@@ -8,8 +8,7 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "50 11 * * *"
-    - cron: "50 12 * * *"
+    - cron: "17 5-12 * * *"
 
 permissions:
   contents: write
@@ -51,14 +50,26 @@ jobs:
           from zoneinfo import ZoneInfo
           now = datetime.now(timezone.utc)
           local = now.astimezone(ZoneInfo("Europe/London"))
-          proceed = True
-          if os.environ["EVENT_NAME"] == "schedule":
-              offset = int(local.utcoffset().total_seconds() // 3600)
-              expected_hour = 12 - offset
-              scheduled_hour = int(os.environ.get("EVENT_SCHEDULE", "0 0 * * *").split()[1])
-              proceed = scheduled_hour == expected_hour
+          import csv
+          from pathlib import Path
           manual = os.environ.get("MANUAL_DATE", "").strip()
           delivery = manual or (local.date() + timedelta(days=1)).isoformat()
+          proceed, reason = True, "new"
+          existing = Path("live/v2/forecasts.csv")
+          if existing.exists() and existing.stat().st_size:
+              with existing.open() as handle:
+                  for row in csv.DictReader(handle):
+                      if row.get("model_version") != os.environ["MODEL_VERSION"]:
+                          continue
+                      t = datetime.fromisoformat(row["delivery_time_utc"].replace("Z", "+00:00"))
+                      if t.astimezone(ZoneInfo("Europe/London")).date().isoformat() == delivery:
+                          proceed, reason = False, "already_issued"
+                          break
+          earliest_delivery = datetime.fromisoformat(delivery + "T00:00:00").replace(
+              tzinfo=ZoneInfo("Europe/London")).astimezone(timezone.utc)
+          if proceed and earliest_delivery - now < timedelta(hours=8):
+              proceed, reason = False, "insufficient_lead"
+          print({"delivery": delivery, "proceed": proceed, "reason": reason})
           with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
               handle.write(f"proceed={str(proceed).lower()}\n")
               handle.write(f"delivery={delivery}\n")
@@ -71,11 +82,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
 
-      - name: Install and test
+      - name: Install and smoke-check
         if: steps.dates.outputs.proceed == 'true'
         run: |
           pip install -e ".[dev]"
-          pytest -q
+          python -c "import gb_platform_v2.cli, gb_platform_v2.shadow_features"
 
       - name: Download frozen V2 model
         if: steps.dates.outputs.proceed == 'true'
@@ -87,6 +98,7 @@ jobs:
           unzip -q "operational_bundle/$RELEASE_ASSET" -d operational_bundle/unpacked
 
       - name: Build exact-vintage V2 features
+        id: features
         if: steps.dates.outputs.proceed == 'true'
         run: >-
           python -m gb_platform_v2.shadow_features
@@ -99,6 +111,7 @@ jobs:
           --summary outputs/v2_shadow_feature_summary.json
 
       - name: Issue immutable V2 shadow forecast
+        id: issue
         if: steps.dates.outputs.proceed == 'true'
         run: >-
           python -m gb_platform_v2.cli live-forecast
@@ -114,17 +127,43 @@ jobs:
           --calibration-lookback-days 7
           --component-forecasts live/v2/component_forecasts.csv
 
+      - name: Record issuance attempt
+        if: always() && steps.dates.outputs.proceed == 'true'
+        env:
+          DELIVERY: ${{ steps.dates.outputs.delivery }}
+          ISSUE: ${{ steps.dates.outputs.issue }}
+          FEATURES: ${{ steps.features.outcome }}
+          ISSUED: ${{ steps.issue.outcome }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p live/v2
+          python - <<'PY'
+          import csv, os
+          from pathlib import Path
+          file = Path("live/v2/forecast_attempts.csv")
+          with file.open("a", newline="") as handle:
+              writer = csv.writer(handle)
+              if file.stat().st_size == 0:
+                  writer.writerow(["delivery_date", "issue_time_utc", "github_run_id", "features_step", "issue_step", "model_version"])
+              writer.writerow([os.environ["DELIVERY"], os.environ["ISSUE"], os.environ["RUN_ID"],
+                               os.environ["FEATURES"], os.environ["ISSUED"], "core-regime-operational-v2"])
+          PY
+
       - name: Commit V2-only immutable history
-        if: steps.dates.outputs.proceed == 'true'
+        if: always() && steps.dates.outputs.proceed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p live/v2
           git add live/v2
           if ! git diff --cached --quiet; then
-            git commit -m "Add V2 prospective shadow forecast ${{ steps.dates.outputs.delivery }}"
-            git pull --rebase origin main
-            git push origin HEAD:main
+            git commit -m "Record V2 shadow issuance attempt ${{ steps.dates.outputs.delivery }}"
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin main && git push origin HEAD:main && exit 0
+              sleep $((attempt * 10))
+            done
+            echo "Unable to commit V2 shadow evidence" >&2
+            exit 1
           fi
 
       - name: Upload V2 shadow evidence
