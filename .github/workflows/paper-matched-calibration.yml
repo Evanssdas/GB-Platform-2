@@ -1,0 +1,46 @@
+name: Paper matched calibration 2x2
+on:
+  push:
+    branches:
+      - paper/matched-winter-grading-20261104
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  matched:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]" scipy
+      - name: Retrieve frozen and daily V2 predictions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs/frozen inputs/daily
+          gh run download 41467930671 --repo "$GITHUB_REPOSITORY" --name reviewer-upgrade-41467930671 --dir inputs/frozen
+          gh run download 41476839798 --repo "$GITHUB_REPOSITORY" --name daily-v2r-41476839798 --dir inputs/daily
+          find inputs -name "*.csv" | head
+      - name: Matched 2x2, 120-minute allowance
+        run: >-
+          python -m gb_platform_v2.matched_calibration
+          --frozen "$(find inputs/frozen -name reviewer_holdout_predictions.csv | head -1)"
+          --daily inputs/daily/daily_v2r_predictions.csv
+          --output outputs/matched_lag120 --publication-lag-minutes 120
+      - name: Matched 2x2, strict end-of-period cutoff (sensitivity)
+        run: >-
+          python -m gb_platform_v2.matched_calibration
+          --frozen "$(find inputs/frozen -name reviewer_holdout_predictions.csv | head -1)"
+          --daily inputs/daily/daily_v2r_predictions.csv
+          --output outputs/matched_lag0 --publication-lag-minutes 0 --no-battery
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: matched-calibration-${{ github.run_id }}
+          path: outputs
+          retention-days: 365

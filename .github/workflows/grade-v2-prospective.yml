@@ -141,7 +141,8 @@ jobs:
           scores = pd.read_csv("live/v2/scores.csv")
           versions = set(scores["model_version"].astype(str))
           expected = {"core-regime-operational-v2"}
-          if versions != expected:
+          # An empty V2 score store is legitimate before the first delivery is graded.
+          if versions and versions != expected:
               raise SystemExit(f"V2 score store contains unexpected model versions: {versions}")
           print({"v2_score_rows": len(scores), "model_versions": sorted(versions)})
           PY

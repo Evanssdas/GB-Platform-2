@@ -24,3 +24,20 @@ def test_publication_allowance_excludes_last_settlement():
     day=pd.Timestamp("2026-10-30").date()
     assert a.loc[a.day==day,"adaptive_p50"].notna().all()
     assert b.loc[b.day==day,"adaptive_p50"].notna().all()
+
+def test_unequal_windows_are_evaluated_on_common_periods(tmp_path):
+    from gb_platform_v2.adaptive_analysis import analyse
+    import numpy as np
+    import pandas as pd
+    t = pd.date_range("2026-01-01", periods=48 * 20, freq="30min", tz="UTC")
+    rng = np.random.default_rng(1)
+    actual = 100 + rng.normal(0, 5, len(t))
+    v = pd.DataFrame({"timestamp": t.strftime("%Y-%m-%dT%H:%M:%SZ"), "actual": actual,
+                      "daily_v2r": actual-20, "d2": actual+3, "median_d2_d8": actual+1})
+    l = v[["timestamp", "actual"]].assign(lear_rolling=actual-5).iloc[48*3:]
+    v.to_csv(tmp_path/"v.csv", index=False)
+    l.to_csv(tmp_path/"l.csv", index=False)
+    result = analyse(tmp_path/"v.csv", tmp_path/"l.csv", tmp_path/"out")
+    assert result["unpaired_dropped"]["v2r_only_periods"] == 48*3
+    assert result["unpaired_dropped"]["lear_only_periods"] == 0
+    assert result["eligible_periods"] > 0
