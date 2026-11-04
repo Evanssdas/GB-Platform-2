@@ -1,5 +1,8 @@
 name: Paper matched calibration 2x2
 on:
+  push:
+    branches:
+      - paper/matched-winter-grading-20261104
   workflow_dispatch:
 permissions:
   contents: read
