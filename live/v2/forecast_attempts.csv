@@ -1,0 +1,2 @@
+delivery_date,issue_time_utc,github_run_id,features_step,issue_step,model_version
+2026-11-05,2026-11-04T12:58:01.172435+00:00,41833793128,success,success,core-regime-operational-v2
