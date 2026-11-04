@@ -38,16 +38,25 @@ def analyse(v2r,lear,output,lag_minutes=120):
     v=pd.read_csv(v2r)
     l=pd.read_csv(lear)
     m="median_d2_d8" if "median_d2_d8" in v.columns else "d2_d8_median"
-    d=v[["timestamp","actual","daily_v2r","d2",m]].merge(
-        l[["timestamp","actual","lear_rolling"]],on="timestamp",
-        suffixes=("","_lear"),validate="one_to_one")
-    if len(d)!=len(v) or len(d)!=len(l):
-        raise ValueError("Incomplete paired prediction windows")
+    # Calibrate on V2's complete residual history before intersecting the
+    # LEAR evaluation window. Missing D2-D8 lag anchors around the annual
+    # archive seam must not erase unrelated calibration observations.
+    v=v.rename(columns={m:"median"})
+    d=calibrate(v[["timestamp","actual","daily_v2r","d2","median"]],lag_minutes)
+    l=l.copy()
+    l["timestamp"]=pd.to_datetime(l["timestamp"],utc=True)
+    n_v=len(d)
+    d=d.merge(l[["timestamp","actual","lear_rolling"]],on="timestamp",how="inner",
+              suffixes=("","_lear"),validate="one_to_one")
+    unpaired={"v2r_only_periods":int(n_v-len(d)),
+              "lear_only_periods":int(len(l)-len(d))}
+    if len(d)<0.9*min(n_v,len(l)):
+        raise ValueError(f"Paired windows overlap too little: {unpaired}")
     if not np.allclose(d.actual,d.actual_lear,atol=1e-6):
         raise ValueError("Actual prices do not match")
-    d=d.drop(columns="actual_lear").rename(columns={m:"median"})
-    d=calibrate(d,lag_minutes)
-    e=d.loc[d.adaptive_p50.notna()].copy()
+    d=d.drop(columns="actual_lear")
+    needed=["adaptive_p50","daily_v2r","lear_rolling","d2","median"]
+    e=d.loc[d[needed].notna().all(axis=1)].copy()
     if e.empty:
         raise ValueError("No eligible post-warmup forecasts")
     models={"adaptive_v2":"adaptive_p50","daily_v2r":"daily_v2r",
@@ -65,7 +74,7 @@ def analyse(v2r,lear,output,lag_minutes=120):
     out=Path(output);out.mkdir(parents=True,exist_ok=True)
     d.to_csv(out/"adaptive_predictions.csv",index=False)
     result={"protocol":"retrospective only","lag_minutes":lag_minutes,
-            "eligible_periods":len(e),"days":int(e.day.nunique()),
+            "eligible_periods":len(e),"days":int(e.day.nunique()),"unpaired_dropped":unpaired,
             "scores_identical_periods":scores,"tests_hac47":tests,
             "interval":interval,"median_shift":float(e.bias_shift.median())}
     (out/"adaptive_results.json").write_text(json.dumps(result,indent=2))
