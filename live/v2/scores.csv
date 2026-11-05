@@ -1,0 +1,1 @@
+forecast_id,model_version,issue_time_utc,actual_revision,delivery_time_utc,actual_price,forecast_p50,error,absolute_error,squared_error,p10_p90_covered,actual_negative,predicted_negative_probability,persistence_price,persistence_absolute_error,graded_at_utc
