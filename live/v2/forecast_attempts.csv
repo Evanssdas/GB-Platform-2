@@ -1,3 +1,4 @@
 delivery_date,issue_time_utc,github_run_id,features_step,issue_step,model_version
 2026-11-05,2026-11-04T12:58:01.172435+00:00,41833793128,success,success,core-regime-operational-v2
 2026-11-06,2026-11-05T13:09:40.711301+00:00,42033276631,success,success,core-regime-operational-v2
+2026-11-07,2026-11-06T12:55:48.401893+00:00,42221399947,success,success,core-regime-operational-v2
