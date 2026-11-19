@@ -4,22 +4,22 @@
   "mode": "shadow_only",
   "metrics": {
     "model_version": "core-regime-operational-v2",
-    "graded_periods": 624,
-    "comparable_persistence_periods": 624,
-    "graded_delivery_days": 13,
+    "graded_periods": 672,
+    "comparable_persistence_periods": 672,
+    "graded_delivery_days": 14,
     "first_delivery_date": "2026-11-05",
-    "last_delivery_date": "2026-11-17",
-    "model_mae_gbp_mwh": 53.166801742651096,
-    "persistence_mae_gbp_mwh": 34.01533653846154,
-    "improvement_percent": -56.30244223082953,
-    "p10_p90_coverage": 0.47596153846153844,
-    "minimum_lead_hours": 10.136666666666667
+    "last_delivery_date": "2026-11-18",
+    "model_mae_gbp_mwh": 53.86994119029568,
+    "persistence_mae_gbp_mwh": 32.881324404761905,
+    "improvement_percent": -63.831421530253756,
+    "p10_p90_coverage": 0.4583333333333333,
+    "minimum_lead_hours": 9.654444444444444
   },
   "gates": {
     "minimum_shadow_days": {
       "passed": false,
       "required": 30,
-      "observed": 13
+      "observed": 14
     },
     "consecutive_delivery_days": {
       "passed": false,
@@ -32,12 +32,12 @@
     "pre_delivery_issue_time": {
       "passed": true,
       "required_hours": 8.0,
-      "observed_minimum_hours": 10.136666666666667
+      "observed_minimum_hours": 9.654444444444444
     },
     "beats_persistence": {
       "passed": false,
       "required_improvement_percent": 5.0,
-      "observed_improvement_percent": -56.30244223082953
+      "observed_improvement_percent": -63.831421530253756
     },
     "interval_coverage": {
       "passed": false,
@@ -45,7 +45,7 @@
         0.7,
         0.9
       ],
-      "observed": 0.47596153846153844
+      "observed": 0.4583333333333333
     }
   },
   "warning": "Passing this software gate supports controlled human review; it is not financial advice or an autonomous trading authorisation."
