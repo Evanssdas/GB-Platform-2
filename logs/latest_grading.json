@@ -3,7 +3,7 @@
   "delivery_date": "2026-11-25",
   "model_version": "core-12m-operational-v1",
   "actual_revision": "initial",
-  "github_run_id": "45881884906",
+  "github_run_id": "46054350031",
   "github_run_attempt": "1",
   "grading_metrics": {
     "actual_periods": 48,

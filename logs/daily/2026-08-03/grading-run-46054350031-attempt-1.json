@@ -1,0 +1,111 @@
+{
+  "workflow_revision": "review-grading-v1",
+  "delivery_date": "2026-08-03",
+  "model_version": "core-12m-operational-v1",
+  "actual_revision": "initial",
+  "github_run_id": "46054350031",
+  "github_run_attempt": "1",
+  "grading_metrics": {
+    "actual_periods": 48,
+    "graded_periods": 48,
+    "model_mae_gbp_mwh": 52.12524260632168,
+    "model_rmse_gbp_mwh": 53.166305756305704,
+    "model_bias_gbp_mwh": -52.12524260632168,
+    "persistence_mae_gbp_mwh": 23.493125000000003,
+    "improvement_percent": -121.87445308498411,
+    "p10_p90_coverage": 0.0,
+    "actual_negative_periods": 0
+  },
+  "deployment_gate": {
+    "workflow_revision": "deployment-gate-v1",
+    "deployment_ready": false,
+    "mode": "shadow_only",
+    "metrics": {
+      "model_version": "core-12m-operational-v1",
+      "graded_periods": 3746,
+      "comparable_persistence_periods": 3746,
+      "graded_delivery_days": 78,
+      "first_delivery_date": "2026-08-01",
+      "last_delivery_date": "2026-11-25",
+      "model_mae_gbp_mwh": 66.09311378438424,
+      "persistence_mae_gbp_mwh": 44.23215963694607,
+      "improvement_percent": -49.42321226652979,
+      "p10_p90_coverage": 0.08275493860117458,
+      "minimum_lead_hours": 1.4666666666666666
+    },
+    "gates": {
+      "minimum_shadow_days": {
+        "passed": true,
+        "required": 30,
+        "observed": 78
+      },
+      "consecutive_delivery_days": {
+        "passed": false,
+        "missing_dates": [
+          "2026-08-02",
+          "2026-10-03",
+          "2026-10-16",
+          "2026-10-17",
+          "2026-10-20",
+          "2026-10-21",
+          "2026-10-22",
+          "2026-10-23",
+          "2026-10-24",
+          "2026-10-26",
+          "2026-10-27",
+          "2026-10-28",
+          "2026-10-29",
+          "2026-10-30",
+          "2026-10-31",
+          "2026-11-01",
+          "2026-11-02",
+          "2026-11-03",
+          "2026-11-04",
+          "2026-11-05",
+          "2026-11-06",
+          "2026-11-07",
+          "2026-11-08",
+          "2026-11-09",
+          "2026-11-10",
+          "2026-11-11",
+          "2026-11-12",
+          "2026-11-13",
+          "2026-11-14",
+          "2026-11-15",
+          "2026-11-16",
+          "2026-11-17",
+          "2026-11-18",
+          "2026-11-19",
+          "2026-11-20",
+          "2026-11-21",
+          "2026-11-22",
+          "2026-11-23",
+          "2026-11-24"
+        ]
+      },
+      "complete_periods": {
+        "passed": true,
+        "missing_periods": {}
+      },
+      "pre_delivery_issue_time": {
+        "passed": false,
+        "required_hours": 8.0,
+        "observed_minimum_hours": 1.4666666666666666
+      },
+      "beats_persistence": {
+        "passed": false,
+        "required_improvement_percent": 5.0,
+        "observed_improvement_percent": -49.42321226652979
+      },
+      "interval_coverage": {
+        "passed": false,
+        "required_range": [
+          0.7,
+          0.9
+        ],
+        "observed": 0.08275493860117458
+      }
+    },
+    "warning": "Passing this software gate supports controlled human review; it is not financial advice or an autonomous trading authorisation."
+  }
+}
